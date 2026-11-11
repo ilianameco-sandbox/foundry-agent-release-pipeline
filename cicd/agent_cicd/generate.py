@@ -61,6 +61,10 @@ SCHEMA = {
 class SpecError(ValueError):
     """pipeline.yaml is invalid."""
 
+    def __init__(self, message: str, problems: list[str] | None = None):
+        super().__init__(message)
+        self.problems = problems or [message]
+
 
 @dataclass
 class Spec:
@@ -127,8 +131,21 @@ def load_spec(agent_dir: Path) -> Spec:
         raise SpecError(f"{path}: not valid YAML: {exc}") from exc
     if not isinstance(data, dict):
         raise SpecError(f"{path}: must be a mapping")
-    agent = agent_dir.resolve().name
     problems: list[str] = []
+    try:
+        kind = agent_kind(agent_dir)
+    except (DefinitionError, OSError, ValueError) as exc:
+        problems.append(str(exc))
+        kind = "prompt"
+    return parse_spec(data, agent_dir.resolve().name, kind, str(path), problems)
+
+
+def parse_spec(data: dict[str, Any], agent: str, kind: str, source: str = SPEC_FILE,
+               problems: list[str] | None = None) -> Spec:
+    """Validate pipeline.yaml settings (already parsed) for one agent. Used by the CLI and the builder UI."""
+    problems = list(problems or [])
+    if not isinstance(data, dict):
+        raise SpecError(f"{source}: must be a mapping")
     if not _AGENT.match(agent):
         problems.append(f"agent folder name '{agent}' must be lowercase letters, digits and dashes "
                         "(it names the workflows, release tags and concurrency groups)")
@@ -137,11 +154,6 @@ def load_spec(agent_dir: Path) -> Spec:
         problems.append(f"unknown setting(s) {', '.join(unknown)} (known: {', '.join(sorted(SCHEMA['']))})")
     if data.get("version") != 1:
         problems.append("version must be 1")
-    try:
-        kind = agent_kind(agent_dir)
-    except (DefinitionError, OSError, ValueError) as exc:
-        problems.append(str(exc))
-        kind = "prompt"
 
     envs = _section(data, "environments", problems)
     gates = _section(data, "gates", problems)
@@ -188,8 +200,8 @@ def load_spec(agent_dir: Path) -> Spec:
         elif env.lower() in seen_envs:
             problems.append(f"{where}.environment '{env}' is used by another role; each role needs its own")
         checks = role.get("checks", "")
-        if not isinstance(checks, str) or "\n" in checks:
-            problems.append(f"{where}.checks must be one line of text")
+        if not isinstance(checks, str) or not checks.isprintable() or len(checks) > 300:
+            problems.append(f"{where}.checks must be one line of printable text, up to 300 characters")
         uat = role.get("uat", False)
         if not isinstance(uat, bool):
             problems.append(f"{where}.uat must be true or false")
@@ -234,8 +246,129 @@ def load_spec(agent_dir: Path) -> Spec:
     spec.drift_cron = _cron(prod, "drift_check", "prod", problems)
     spec.harvest_cron = _cron(harvest, "schedule", "harvest", problems)
     if problems:
-        raise SpecError(f"{path}:\n  - " + "\n  - ".join(problems))
+        raise SpecError(f"{source}:\n  - " + "\n  - ".join(problems), problems)
     return spec
+
+
+def presets() -> dict[str, dict[str, Any]]:
+    """Residency presets: description and the regions a pipeline.yaml may narrow to (empty: no region rules)."""
+    out = {}
+    for path in sorted(PRESETS_DIR.glob("*.json")):
+        preset = json.loads(path.read_text(encoding="utf-8"))
+        rules = [preset.get("rules", {}).get(r) or {} for r in REGION_RULES]
+        regions: list[str] = []
+        if all(r.get("severity", "block") != "off" for r in rules):
+            allowed = [set(r.get("allowed_regions") or []) for r in rules]
+            regions = sorted(set.intersection(*allowed))
+        out[path.stem] = {"description": preset.get("description", ""), "regions": regions}
+    return out
+
+
+DEFAULT_SPEC: dict[str, Any] = {
+    "version": 1,
+    "environments": {"test": True},
+    "gates": {
+        "redteam": True,
+        "signoffs": [
+            {"id": "qa", "title": "QA", "environment": "signoff-qa",
+             "checks": "Evaluation and red-team results reviewed; failures understood"},
+            {"id": "business", "title": "Business owner (UAT)", "environment": "signoff-business",
+             "checks": "Users tried the release candidate in the test project and rated answers", "uat": True},
+            {"id": "rai", "title": "Responsible AI reviewer", "environment": "signoff-rai",
+             "checks": "RAI scorecard, residency findings and privacy results accepted"},
+        ],
+        "require_distinct_approvers": True,
+        "max_signoff_age_days": 14,
+    },
+    "residency": {"preset": "permissive", "enforcement": "warn", "allowed_regions": []},
+    "prod": {"rollback_on_smoke_failure": True, "drift_check": "17 6 * * *"},
+    "harvest": {"schedule": ""},
+}
+
+
+def spec_data(spec: Spec) -> dict[str, Any]:
+    """The pipeline.yaml settings of a validated spec, in canonical form."""
+    return {
+        "version": 1,
+        "environments": {"test": spec.test},
+        "gates": {"redteam": spec.redteam, "signoffs": [dict(r) for r in spec.signoffs],
+                  "require_distinct_approvers": spec.require_distinct_approvers,
+                  "max_signoff_age_days": spec.max_signoff_age_days},
+        "residency": {"preset": spec.preset, "enforcement": spec.enforcement,
+                      "allowed_regions": list(spec.allowed_regions)},
+        "prod": {"rollback_on_smoke_failure": spec.rollback_on_smoke_failure, "drift_check": spec.drift_cron},
+        "harvest": {"schedule": spec.harvest_cron},
+    }
+
+
+def _y(value: Any) -> str:
+    # JSON scalars and flow lists are valid YAML, and quoting every string keeps titles and crons unambiguous.
+    return json.dumps(value, ensure_ascii=False)
+
+
+def dump_spec(spec: Spec) -> str:
+    """Canonical, commented pipeline.yaml. The builder writes this; hand edits are still accepted."""
+    roles = []
+    for role in spec.signoffs:
+        roles.append(f"    - id: {_y(role['id'])}")
+        roles.append(f"      title: {_y(role['title'])}")
+        roles.append(f"      environment: {_y(role['environment'])}")
+        if role.get("checks"):
+            roles.append(f"      checks: {_y(role['checks'])}")
+        if role.get("uat"):
+            roles.append("      uat: true")
+    return "\n".join([
+        "# Release pipeline for this agent: what a change goes through between a commit and prod.",
+        "# Edit it with the pipeline builder (python -m agent_cicd.builder) or by hand, then run from cicd/:",
+        "#   python -m agent_cicd.generate",
+        "# That rewrites this agent's workflows (.github/workflows/<agent>-*.yml) and the sign-off and residency",
+        "# settings in governance.json and policy.json. CI fails if those files no longer match this one.",
+        "# Preview without writing anything:  python -m agent_cicd.generate --plan --agent-dir agents/<agent>",
+        "#",
+        "# Always on: G1 code & security, G2 config & residency before every deploy, G3 evaluation in dev,",
+        "# and the release manager's approval of the `prod` environment (G6). Pass bars and test cases stay in eval/.",
+        "version: 1",
+        "",
+        "environments:",
+        "  # dev and prod always exist. test is a separate Foundry project for the release candidate, red teaming and UAT.",
+        "  # false: releases go dev -> prod, red teaming (if on) runs in dev, and there is no UAT.",
+        f"  test: {_y(spec.test)}",
+        "",
+        "gates:",
+        "  # G4: AI red teaming of the release candidate (eval/redteam.json). false: the approval packet shows it as off.",
+        f"  redteam: {_y(spec.redteam)}",
+        "  # G5: who signs off before the release manager. Each role approves its own GitHub environment",
+        "  # (create it with the role's people as required reviewers). Roles appear in this order in governance.json.",
+        "  # uat: true marks the role that confirms UAT is done; the UAT evidence check (eval/uat.json: testers rated",
+        "  # enough answers of the release candidate) runs after it. Needs environments.test. Remove it to skip UAT.",
+        "  signoffs:",
+        *roles,
+        "  # false only for a solo trial where one person holds every role",
+        f"  require_distinct_approvers: {_y(spec.require_distinct_approvers)}",
+        "  # G6 rejects sign-offs older than this",
+        f"  max_signoff_age_days: {_y(spec.max_signoff_age_days)}",
+        "",
+        "residency:",
+        f"  # G2 rules: {', '.join(presets())} (cicd/policies/presets)",
+        f"  preset: {_y(spec.preset)}",
+        "  # warn: report would-block findings only; enforce: block the deploy. Keep warn until the resources comply.",
+        f"  enforcement: {_y(spec.enforcement)}",
+        "  # Optional: narrow the preset's allowed regions for models and data stores, e.g. [\"canadacentral\"]",
+        f"  allowed_regions: {_y(list(spec.allowed_regions))}",
+        "",
+        "prod:",
+        "  # Restore the previous prod version automatically when the new one fails its smoke checks",
+        f"  rollback_on_smoke_failure: {_y(spec.rollback_on_smoke_failure)}",
+        "  # Drift check schedule (cron, UTC); scheduled runs also need the repository variable",
+        "  # ENABLE_PROD_DRIFT_CHECK=true. Empty: on demand only.",
+        f"  drift_check: {_y(spec.drift_cron)}",
+        "",
+        "harvest:",
+        "  # Real conversations -> candidate test cases (cron, UTC), e.g. \"0 11 * * 1\" for Mondays 11:00.",
+        "  # Empty: run it by hand until the agent has real users.",
+        f"  schedule: {_y(spec.harvest_cron)}",
+        "",
+    ])
 
 
 # ---------------------------------------------------------------- rendering
@@ -372,6 +505,53 @@ def apply(changes: list[Change]) -> None:
         else:
             change.path.parent.mkdir(parents=True, exist_ok=True)
             change.path.write_text(change.content, encoding="utf-8", newline="\n")
+
+
+def plan_model(spec: Spec) -> list[dict[str, Any]]:
+    """The pipeline as lanes of steps, for the builder's diagram. Optional steps stay in the list with on=False,
+    and `toggle` names the pipeline.yaml setting that turns them on or off."""
+    uat = spec.uat_role
+    hosted = spec.kind == "hosted"
+
+    def step(key, title, detail, kind, on=True, toggle=None, **extra):
+        return {"key": key, "title": title, "detail": detail, "kind": kind, "on": on, "toggle": toggle, **extra}
+
+    release = [
+        step("deploy-test", "Deploy test", "G2 residency + smoke checks in the test/UAT project", "deploy",
+             spec.test, "environments.test"),
+        step("redteam", "G4 AI red teaming", f"Release candidate attacked in {'test' if spec.test else 'dev'}",
+             "gate", spec.redteam, "gates.redteam"),
+        step("packet", "Approval packet", "Every gate, residency findings, Responsible AI scorecard", "info"),
+        step("signoffs", "G5 sign-offs", "Each role approves its own GitHub environment", "human",
+             roles=[{"title": r["title"], "environment": r["environment"], "uat": bool(r.get("uat"))}
+                    for r in spec.signoffs]),
+        step("uat", "UAT evidence", (f"After {uat['title']}: testers rated enough answers in test" if uat
+                                     else "No role is marked uat: true"), "gate", bool(uat)),
+        step("decision", "G6 release decision",
+             f"All sign-offs present, under {spec.max_signoff_age_days} days old"
+             + (", by different people" if spec.require_distinct_approvers else ""), "gate"),
+        step("approve", "Release manager", "Approves the prod environment", "human"),
+        step("deploy-prod", "Deploy prod", "G2 + smoke checks" + ("; restores the previous version if they fail"
+                                                                  if spec.rollback_on_smoke_failure else ""),
+             "deploy", rollback=spec.rollback_on_smoke_failure),
+    ]
+    regions = f" in {', '.join(spec.allowed_regions)}" if spec.allowed_regions else ""
+    return [
+        {"lane": "Pull request", "steps": [
+            step("g1", "G1 code & security", "Secret and dependency scans, unit tests, rule files"
+                 + ("; image build + vulnerability scan" if hosted else ""), "gate")]},
+        {"lane": "Merge to main", "steps": [
+            step("deploy-dev", "Deploy dev", f"G2 residency ({spec.preset}, {spec.enforcement}{regions}) + smoke",
+                 "deploy"),
+            step("g3", "G3 evaluation", "Quality and Responsible AI checks on the dev version", "gate")]},
+        {"lane": f"Release tag {spec.agent}-v1.2.3", "steps": release},
+        {"lane": "After release", "steps": [
+            step("drift", "Drift check", spec.drift_cron or "On demand only", "info", bool(spec.drift_cron)),
+            step("rollback", "Rollback", "On demand; release manager approves", "info"),
+            step("harvest", "Trace harvest", spec.harvest_cron or "On demand only", "info", bool(spec.harvest_cron)),
+            step("promote", "Promote portal version", "Prompt agents only" if hosted else "On demand",
+                 "info", not hosted)]},
+    ]
 
 
 def describe(spec: Spec) -> str:

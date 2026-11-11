@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pipeline builder</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <header>
+    <div class="brand">Agent release pipeline <span>builder</span></div>
+    <label class="agent-pick">Agent
+      <select id="agent"></select>
+    </label>
+    <span id="kind" class="badge"></span>
+    <span id="status" class="status"></span>
+  </header>
+  <main>
+    <section id="form" class="form" aria-label="Pipeline settings"></section>
+    <section class="result" aria-label="Pipeline preview">
+      <div class="toolbar">
+        <h2>Your pipeline</h2>
+        <span class="hint">Click a dashed step to turn it on, a solid optional step to turn it off.</span>
+      </div>
+      <div id="diagram" class="diagram"></div>
+      <div id="problems" class="problems" hidden></div>
+      <div id="saved" class="saved" hidden></div>
+      <div class="files-head">
+        <h2>Files the generator will change</h2>
+        <div class="actions">
+          <button id="revert" type="button" class="secondary">Revert</button>
+          <button id="save" type="button">Save pipeline.yaml and generate</button>
+        </div>
+      </div>
+      <div id="files" class="files"></div>
+      <details class="plan"><summary>Plain-text plan (same as <code>generate --plan</code>)</summary><pre id="plan"></pre></details>
+    </section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

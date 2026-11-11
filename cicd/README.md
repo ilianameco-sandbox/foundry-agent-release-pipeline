@@ -36,7 +36,21 @@ Roles and the sign-off rules are set in `agents/my-agent/pipeline.yaml`, which w
 
 ## Shaping the pipeline (pipeline.yaml)
 
-Each agent folder has a `pipeline.yaml` that says which steps its releases go through. Edit it, then generate:
+Each agent folder has a `pipeline.yaml` that says which steps its releases go through. Shape it in the **pipeline builder**, a local web page:
+
+```bash
+cd cicd
+python -m agent_cicd.builder        # opens http://127.0.0.1:8765
+```
+
+Pick the agent, then switch steps on and off: in the form, or by clicking a step in the diagram. You can also drag sign-off roles into order, pick a residency preset and regions, and choose schedules. The page shows:
+- the pipeline as a diagram, updated with each change;
+- any problems with your choices, using the same rules as the generator;
+- every file the generator would change, with its diff.
+
+**Save** writes `pipeline.yaml` and runs the generator; the page never writes workflows itself. Agent folders without a `pipeline.yaml` (such as `my-hosted-agent`) start from the defaults. The builder listens on 127.0.0.1 only. The page and every request need a random token that is only in the URL the command prints, so neither other websites nor other users on the machine can use it.
+
+Or edit `pipeline.yaml` by hand and generate:
 
 ```bash
 cd cicd
@@ -59,7 +73,7 @@ Always on: G1, G2 before every deploy, G3 in dev and the release manager's `prod
 
 The generator writes the agent's workflows (`.github/workflows/<agent>-release.yml`, `-rollback-prod.yml`, `-prod-drift-check.yml`, `-harvest-traces.yml` and, for prompt agents, `-promote-portal-agent.yml`). It also writes the sign-off keys of `governance.json` and the `preset`, `enforcement` and allowed regions of `policy.json`; the rest of those files stays yours. G1 runs `python -m agent_cicd.generate --check` and fails if a generated file no longer matches `pipeline.yaml`, so change `pipeline.yaml`, not the generated files. After changing sign-off roles, create their GitHub environments (see [One-time setup](#one-time-setup)).
 
-`pipeline.yaml` is the format a visual pipeline builder would read and write; the generator stays the only thing that turns it into workflows.
+`pipeline.yaml` is the only thing the builder edits; the generator stays the only thing that turns it into workflows.
 
 ## Adapting the template to your agent
 
@@ -103,7 +117,7 @@ The template ships 13 generic must-pass behavior cases (scope, authority, prompt
 
 ## Hosted agents
 
-A hosted agent is your own code (Microsoft Agent Framework, LangGraph, or any framework) running in a container that Foundry hosts. The pipeline tells the two kinds apart by `"kind"` in `agent.json`, so the same generated release workflow releases either. Start from [agents/my-hosted-agent/](agents/my-hosted-agent/), put the code and its `Dockerfile` in `src/` (its [README](agents/my-hosted-agent/src/README.md) lists what the image must do), copy `agents/my-agent/pipeline.yaml` into the folder and run the generator. Hosted agents get no portal-promotion workflow: their code lives in the repo.
+A hosted agent is your own code (Microsoft Agent Framework, LangGraph, or any framework) running in a container that Foundry hosts. The pipeline tells the two kinds apart by `"kind"` in `agent.json`, so the same generated release workflow releases either. Start from [agents/my-hosted-agent/](agents/my-hosted-agent/), put the code and its `Dockerfile` in `src/` (its [README](agents/my-hosted-agent/src/README.md) lists what the image must do), then shape its pipeline in the builder (`python -m agent_cicd.builder`, which starts from the defaults) or copy `agents/my-agent/pipeline.yaml` into the folder and run the generator. Hosted agents get no portal-promotion workflow: their code lives in the repo.
 
 **Build once, promote by digest.** Every environment runs the exact image that was tested:
 
@@ -313,6 +327,7 @@ cicd/
                           release_report, drift, promote, harvest, image (hosted build info, promotion by digest)
                           + pure gate logic (gates.py)
                           + generate (pipeline.yaml → workflows and settings) with its templates/
+                          + builder (local web page for pipeline.yaml) with its builder_ui/
   tests/                  offline unit tests (fixtures in tests/fixtures)
 .github/workflows/        generated per agent from its pipeline.yaml, except agent-deploy.yml:
   my-agent-release.yml    the pipeline for one agent (prompt or hosted)
@@ -358,7 +373,7 @@ cicd/
 | You do | Pipeline does |
 |---|---|
 | *Actions → my-agent-promote-portal-agent → Run workflow* with a dev agent version | Exports that portal version into `agent.json` + `instructions.md` and opens a PR (nothing deployed) |
-| Edit `pipeline.yaml`, run `python -m agent_cicd.generate`, open a PR | G1 checks the generated files match; after merge, releases follow the new shape |
+| Edit `pipeline.yaml` (or use `python -m agent_cicd.builder`), run `python -m agent_cicd.generate`, open a PR | G1 checks the generated files match; after merge, releases follow the new shape |
 | Open a PR touching `cicd/` | G1 only |
 | Merge to `main` | G1 → G2 + deploy a new dev version → G3. Stops there |
 | `git tag my-agent-v1.0.0` then `git push origin my-agent-v1.0.0` | G1 → dev → G3 → G2 + test deploy → G4 → packet → sign-offs and UAT (G5) → release decision → release manager approves prod → G2 + prod deploy → smoke (or rollback) |
@@ -398,6 +413,7 @@ python -m pip install -r requirements.txt pytest==8.4.2
 python -m pytest tests -q
 python -m agent_cicd.generate --check     # generated workflows and settings match every pipeline.yaml
 python -m agent_cicd.generate --plan --agent-dir agents/my-agent
+python -m agent_cicd.builder              # pipeline builder page (Ctrl+C to stop)
 python -m agent_cicd.deploy --agent-dir agents/my-agent --env dev --dry-run
 python -m agent_cicd.quality_gate --agent-dir agents/my-agent --env dev --validate-only
 # Hosted agent: kind and build info, then render with an image digest (no Azure calls):

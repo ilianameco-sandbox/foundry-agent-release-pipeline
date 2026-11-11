@@ -24,7 +24,7 @@ on demand   ──► rollback-prod: release manager approves ──► an earli
 | G6 Release decision | all sign-offs present and recent, then the release manager approves `prod` | before every prod deploy |
 | Rollback | automatic when prod fails its smoke checks; on demand with `my-agent-rollback-prod.yml` (release manager approves, restores an earlier released version) | prod deploy failure; on demand |
 
-That is the default shape. Each agent's [`pipeline.yaml`](cicd/agents/my-agent/pipeline.yaml) can drop the test environment, red teaming or UAT, change the sign-off roles, residency preset and regions, and the schedules. `python -m agent_cicd.generate` turns it into the agent's workflows, and G1 fails if they drift apart. See [Shaping the pipeline](cicd/README.md#shaping-the-pipeline-pipelineyaml).
+That is the default shape. Each agent's [`pipeline.yaml`](cicd/agents/my-agent/pipeline.yaml) can drop the test environment, red teaming or UAT, change the sign-off roles, residency preset and regions, and the schedules. Shape it in the **pipeline builder** (`cd cicd && python -m agent_cicd.builder`), a local page that shows the pipeline as a live diagram and the exact files that will change, or edit it by hand. `python -m agent_cicd.generate` turns it into the agent's workflows, and G1 fails if they drift apart. See [Shaping the pipeline](cicd/README.md#shaping-the-pipeline-pipelineyaml).
 
 ## Contents
 
@@ -38,7 +38,7 @@ That is the default shape. Each agent's [`pipeline.yaml`](cicd/agents/my-agent/p
 
 1. **Use this repo as a template** (or fork it) for your agent.
 2. **Describe your agent.** For a prompt agent, edit [cicd/agents/my-agent/](cicd/agents/my-agent/): instructions, tools and the per-environment configs. For a hosted (container) agent, start from [cicd/agents/my-hosted-agent/](cicd/agents/my-hosted-agent/), put your code and `Dockerfile` in its `src/` folder and copy `my-agent/pipeline.yaml` into it. Rename the folder to your agent's name if you like: it names the workflows and release tags. The pipeline reads `kind` from `agent.json` and picks the matching build and deploy path.
-3. **Shape the pipeline** in the agent's `pipeline.yaml`: test environment or not, red teaming, sign-off roles and UAT, residency preset and regions, schedules. Then run `cd cicd && python -m agent_cicd.generate` and commit the generated workflows.
+3. **Shape the pipeline** for the agent: test environment or not, red teaming, sign-off roles and UAT, residency preset and regions, schedules. Use the builder (`cd cicd && python -m agent_cicd.builder`) or edit `pipeline.yaml` and run `python -m agent_cicd.generate`. Commit `pipeline.yaml` and the generated workflows.
 4. **Write your test cases** in `eval/dataset.jsonl`: keep the generic behavior cases, replace the placeholder document questions with real ones, and raise `min_cases` in `eval/thresholds.json` to 100 or more.
 5. **Set up Azure and GitHub** (projects, identities, environments): see [One-time setup](cicd/README.md#one-time-setup).
 6. **Release:** merge to `main` for dev and evaluation, then push a tag such as `my-agent-v1.0.0` to run the full release.

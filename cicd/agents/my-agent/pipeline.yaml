@@ -1,7 +1,8 @@
 # Release pipeline for this agent: what a change goes through between a commit and prod.
-# After editing, run from cicd/:   python -m agent_cicd.generate
-# It rewrites this agent's workflows (.github/workflows/<agent>-*.yml) and the sign-off and residency settings in
-# governance.json and policy.json. CI fails if those files no longer match this one, so edit here, not there.
+# Edit it with the pipeline builder (python -m agent_cicd.builder) or by hand, then run from cicd/:
+#   python -m agent_cicd.generate
+# That rewrites this agent's workflows (.github/workflows/<agent>-*.yml) and the sign-off and residency
+# settings in governance.json and policy.json. CI fails if those files no longer match this one.
 # Preview without writing anything:  python -m agent_cicd.generate --plan --agent-dir agents/<agent>
 #
 # Always on: G1 code & security, G2 config & residency before every deploy, G3 evaluation in dev,
@@ -21,37 +22,37 @@ gates:
   # uat: true marks the role that confirms UAT is done; the UAT evidence check (eval/uat.json: testers rated
   # enough answers of the release candidate) runs after it. Needs environments.test. Remove it to skip UAT.
   signoffs:
-    - id: qa
-      title: QA
-      environment: signoff-qa
-      checks: Evaluation and red-team results reviewed; failures understood
-    - id: business
-      title: Business owner (UAT)
-      environment: signoff-business
-      checks: Users tried the release candidate in the test project and rated answers
+    - id: "qa"
+      title: "QA"
+      environment: "signoff-qa"
+      checks: "Evaluation and red-team results reviewed; failures understood"
+    - id: "business"
+      title: "Business owner (UAT)"
+      environment: "signoff-business"
+      checks: "Users tried the release candidate in the test project and rated answers"
       uat: true
-    - id: rai
-      title: Responsible AI reviewer
-      environment: signoff-rai
-      checks: RAI scorecard, residency findings and privacy results accepted
+    - id: "rai"
+      title: "Responsible AI reviewer"
+      environment: "signoff-rai"
+      checks: "RAI scorecard, residency findings and privacy results accepted"
   # false only for a solo trial where one person holds every role
   require_distinct_approvers: true
   # G6 rejects sign-offs older than this
   max_signoff_age_days: 14
 
 residency:
-  # G2 rules: canada-strict, eu-data-zone, us-standard or permissive (cicd/policies/presets)
-  preset: permissive
+  # G2 rules: canada-strict, eu-data-zone, permissive, us-standard (cicd/policies/presets)
+  preset: "permissive"
   # warn: report would-block findings only; enforce: block the deploy. Keep warn until the resources comply.
-  enforcement: warn
-  # Optional: narrow the preset's allowed regions for models and data stores, e.g. [canadacentral]
+  enforcement: "warn"
+  # Optional: narrow the preset's allowed regions for models and data stores, e.g. ["canadacentral"]
   allowed_regions: []
 
 prod:
   # Restore the previous prod version automatically when the new one fails its smoke checks
   rollback_on_smoke_failure: true
-  # Daily drift check (cron, UTC); scheduled runs also need the repository variable ENABLE_PROD_DRIFT_CHECK=true.
-  # Empty: on demand only.
+  # Drift check schedule (cron, UTC); scheduled runs also need the repository variable
+  # ENABLE_PROD_DRIFT_CHECK=true. Empty: on demand only.
   drift_check: "17 6 * * *"
 
 harvest:
