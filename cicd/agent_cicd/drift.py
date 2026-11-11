@@ -3,7 +3,6 @@
 Compares the latest prod agent version with the files at the checked-out ref (the workflow checks out the
 newest release tag) and flags:
   * a version created outside the pipeline (someone edited the agent in the portal or with the SDK),
-  * a rollback (prod went back to an earlier version after a failed release),
   * a definition that differs from the released files,
   * a model deployment upgraded since the release (same agent, different model version),
   * (hosted agents) a container image other than the one the pipeline deployed. The image digest is not in
@@ -35,9 +34,6 @@ def find_drift(expected: dict[str, Any], expected_model_version: str, live: dict
     if metadata.get("deployed_by") != "agent-cicd":
         findings.append(f"Version {live.get('version')} was not created by the pipeline "
                         "(edited in the Foundry portal or with the SDK)")
-    elif metadata.get("rollback_of"):
-        findings.append(f"Version {live.get('version')} is a rollback to version {metadata['rollback_of']}: prod does "
-                        "not run the latest release")
     if expected.get("kind") == "hosted" and "container_configuration" not in expected:
         live_digest = image_digest(live_definition)
         if not metadata.get("image_digest"):
@@ -75,13 +71,17 @@ def main() -> int:
         live = (details.get("versions") or {}).get("latest") or {}
     findings = find_drift(rendered.definition, model_version, live)
     status = "drift" if findings else "ok"
+    live_metadata = live.get("metadata") or {}
     lines = [f"### {'⚠️ Drift' if findings else '✅ No drift'}: {rendered.agent_name} in {args.env}", "",
-             f"- Live version: {live.get('version')} (git {str((live.get('metadata') or {}).get('git_sha', '?'))[:7]})",
+             f"- Live version: {live.get('version')} (git {str(live_metadata.get('git_sha', '?'))[:7]})",
              f"- Compared with: {args.ref or 'checked-out files'}; model {model_version}"]
+    if live_metadata.get("rollback_of"):
+        lines.append(f"- ↩️ Live version is a rollback to version {live_metadata['rollback_of']}"
+                     + (f": {live_metadata['rollback_reason']}" if live_metadata.get("rollback_reason") else ""))
     lines += [f"- ❗ {f}" for f in findings]
     if findings:
         lines += ["", "Fix: release the intended change through the pipeline (or promote the portal edit to a PR "
-                  "with the promote workflow), or roll prod back with `deploy.py --rollback-to`."]
+                  "with the promote workflow), or roll prod back with the rollback-prod workflow."]
     add_summary("\n".join(lines) + "\n")
     write_report(args.report, {"status": status, "findings": findings, "live_version": live.get("version"),
                                "ref": args.ref, "model_version": model_version})

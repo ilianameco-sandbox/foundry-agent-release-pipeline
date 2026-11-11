@@ -15,6 +15,7 @@ Every release has to pass security scans, the agent's residency rules, a two-sui
 | G5 | `signoff-qa`, `signoff-rai`, `signoff-business` + `uat-evidence` | release tags | each role approves its GitHub environment; after the business sign-off, testers' ratings of the test version meet `eval/uat.json` |
 | G6 | `release-decision` → `deploy-prod` | release tags | all sign-offs present and under 14 days old; the release manager approves `prod`; prod passes G2 and the smoke checks, or rolls back |
 | Drift | `prod-drift-check.yml` | daily (opt-in) | prod still runs the last released definition and model; otherwise an issue is opened |
+| Rollback | inside `deploy-prod`; `rollback-prod.yml` | prod smoke failure; on demand | the previous (or a chosen earlier) released version is restored and passes the smoke checks. See [Rollback](#rollback) |
 
 Every gate **fails closed**: an API error, a missing result, an incomplete run or too few cases blocks promotion. Outcomes are `PASS`, `REVIEW` (passes, flagged for the approver), `INCONCLUSIVE` and `FAIL`; only the first two continue.
 
@@ -68,7 +69,7 @@ Then add `"SEARCH_INDEX_ASSET": "<index-name>/versions/1"` to `variables` in eac
 
 The template ships 13 generic must-pass behavior cases (scope, authority, prompt injection, safety, privacy) that suit most enterprise agents, and 4 placeholder document questions to replace. A judge sees only `reference_facts`, so they must state everything the source says that an answer may repeat. Use category `none` for in-scope questions no source covers; groundedness skips them. Raise `min_cases` to 100 or more before the first production release.
 
-**More than one agent.** Copy the agent folder, copy `.github/workflows/agent-release.yml`, and replace `my-agent` in the copy (agent folder, tag prefix and concurrency groups). Each agent gets its own release tags, such as `billing-agent-v1.0.0`.
+**More than one agent.** Copy the agent folder, copy `.github/workflows/agent-release.yml` and `rollback-prod.yml`, and replace `my-agent` in the copies (agent folder, tag prefix and concurrency groups). Each agent gets its own release tags, such as `billing-agent-v1.0.0`.
 
 ## Hosted agents
 
@@ -237,12 +238,24 @@ The approval is the GitHub environment, not the 👍: a rating can't block anyth
 
 `prod-drift-check.yml` runs daily (once you set the repository variable `ENABLE_PROD_DRIFT_CHECK` to `true`) and on demand, with the prod identity in the `prod-monitor` environment, which has no reviewer and is limited to `main`. It compares the latest prod version with the agent files of the last successful prod deployment and opens a "Prod drift" issue if:
 - the version wasn't created by the pipeline;
-- prod was rolled back to an earlier version after a failed release;
 - its definition differs from the release;
 - the model deployment was upgraded since the release;
 - (hosted agents) it runs a different image digest than the one the pipeline deployed.
 
 It closes the issue when prod matches again.
+
+## Rollback
+
+- **Automatic, during a release:** when the new prod version fails its smoke checks, or a hosted version never becomes active, the prod deploy recreates the previous version as the newest one. The release run fails, so the drift check keeps the previous release as its reference.
+- **Manual, later (`rollback-prod.yml`):** when a problem shows up after a release.
+  1. Open *Actions → my-agent-rollback-prod → Run workflow*.
+  2. Under *Use workflow from*, pick the **tag of the release you are going back to**. The `prod` environment only accepts release tags, and the job checks the version against that tag's agent files.
+  3. Enter the prod **version** that release deployed (shown in its approval issue and in the Foundry portal), and a **reason**.
+  4. The release manager approves `prod`. The job then recreates that version as the newest one, runs the smoke checks and posts the result to the release issue.
+
+  It refuses a version the pipeline didn't create, or one that doesn't match the tag's files. Hosted agents get back the exact image digest, so keep released images in the registry: don't let a retention policy delete them.
+
+A rollback creates a new version; nothing is deleted, so you can roll forward again by releasing a fixed version. Tags created before this workflow existed don't contain it. For those, run `python -m agent_cicd.deploy --agent-dir agents/my-agent --env prod --rollback-to <version> --require-released --reason "<why>"` from that tag's checkout, with the prod identity.
 
 ## Layout
 
@@ -273,6 +286,7 @@ cicd/
   agent-release.yml       the pipeline for one agent (prompt or hosted)
   agent-deploy.yml        reusable deploy (G2 → hosted: build, scan, push → create version → record → smoke → optional rollback)
   prod-drift-check.yml    daily: prod vs the last release
+  rollback-prod.yml       manual: restore an earlier released prod version (release manager approves)
   promote-portal-agent.yml  manual: agent version built in the Foundry portal → pull request
   harvest-traces.yml      manual: real conversations → candidate test cases → pull request
 .github/scripts/release-issue.sh     posts a report to the release's approval issue
@@ -317,6 +331,7 @@ cicd/
 | `git tag my-agent-v1.0.0` then `git push origin my-agent-v1.0.0` | G1 → dev → G3 → G2 + test deploy → G4 → packet → sign-offs and UAT (G5) → release decision → release manager approves prod → G2 + prod deploy → smoke (or rollback) |
 | *Actions → my-agent-release → Run workflow* with `force_redteam` | dev → G3 → test → fresh red-team scan → packet, no sign-offs or prod |
 | *Run workflow* with `force_eval` | dev → a fresh G3 even if a passing one exists |
+| *Actions → my-agent-rollback-prod → Run workflow* from an earlier release tag | release manager approves `prod` → that release's version becomes the newest prod version → smoke checks → result on the release issue |
 
 A release reaches the sign-off reviewers in about an hour when a new red-team scan is needed, or a few minutes when the agent and tests are unchanged since the last passing runs. UAT then takes as long as the testers need: approvals wait up to 30 days.
 

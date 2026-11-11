@@ -2,11 +2,16 @@
 
 A reusable GitHub Actions pipeline that takes a Microsoft Foundry agent (prompt or hosted) from dev, through a test/UAT project, to production. On the way the agent passes security, data-residency, quality, Responsible AI, red-team and human gates. Every gate fails closed: an error or a missing result blocks the release, never lets it through.
 
+![Release pipeline: change the agent, build and test in dev, test/UAT with sign-offs, release to prod with drift checks and rollback](docs/release-pipeline.png)
+
+*The target design. To change it, edit [docs/release-pipeline.drawio](docs/release-pipeline.drawio) and re-export the PNG. Identity persona tests, continuous evaluation and ASSERT-drafted test cases are planned, not built yet (see [Scope and limitations](#scope-and-limitations)).*
+
 ```
 PR / push ──► G1 code & security ──► G2 residency + deploy dev ──► G3 evaluation (quality + RAI)
 release tag ──► G2 + deploy test ──► G4 AI red team ──► approval packet + RAI scorecard
             ──► G5 UAT ratings + QA / business / RAI sign-offs ──► G6 release decision ──► G2 + deploy prod + smoke + auto-rollback
 daily       ──► prod drift check
+on demand   ──► rollback-prod: release manager approves ──► an earlier released version restored + smoke
 ```
 
 | Gate | What it checks | When it runs |
@@ -17,14 +22,15 @@ daily       ──► prod drift check
 | G4 Red team | Foundry AI Red Teaming of the release candidate in the test project | release tags (reused when unchanged) |
 | G5 UAT + sign-offs | testers' ratings of the exact release candidate in Foundry (human evaluation / trace 👍👎), then QA, business-owner and RAI approvals | release tags |
 | G6 Release decision | all sign-offs present and recent, then the release manager approves `prod` | before every prod deploy |
+| Rollback | automatic when prod fails its smoke checks; on demand with `rollback-prod.yml` (release manager approves, restores an earlier released version) | prod deploy failure; on demand |
 
 ## Contents
 
 - [cicd/](cicd/): agent-as-code, residency rules, evaluation datasets, pass bars, the gate CLIs and tests. **Start with [cicd/README.md](cicd/README.md)** for setup, roles and the runbook.
 - [cicd/agents/my-agent/](cicd/agents/my-agent/): the prompt-agent template. Values in `<angle brackets>` are placeholders to replace.
 - [cicd/agents/my-hosted-agent/](cicd/agents/my-hosted-agent/): the hosted-agent template (your code and `Dockerfile` go in `src/`).
-- [.github/workflows/](.github/workflows/): the release pipeline (`agent-release.yml`), the reusable deploy workflow (`agent-deploy.yml`), the prod drift check (`prod-drift-check.yml`), portal-to-PR promotion (`promote-portal-agent.yml`) and the trace harvest that proposes new test cases from real conversations (`harvest-traces.yml`).
-- [docs/release-pipeline.drawio](docs/release-pipeline.drawio): the pipeline design (open it at [app.diagrams.net](https://app.diagrams.net)).
+- [.github/workflows/](.github/workflows/): the release pipeline (`agent-release.yml`), the reusable deploy workflow (`agent-deploy.yml`), manual prod rollback (`rollback-prod.yml`), the prod drift check (`prod-drift-check.yml`), portal-to-PR promotion (`promote-portal-agent.yml`) and the trace harvest that proposes new test cases from real conversations (`harvest-traces.yml`).
+- [docs/release-pipeline.drawio](docs/release-pipeline.drawio): the pipeline design (open it at [app.diagrams.net](https://app.diagrams.net)); [docs/release-pipeline.png](docs/release-pipeline.png) is the exported image shown above.
 
 ## Getting started
 

@@ -319,6 +319,37 @@ def test_rollback_keeps_the_source_versions_release_record(tmp_path, monkeypatch
     assert metadata["fingerprint"] == "f" * 32 and metadata["model_version"] == "gpt@1"
 
 
+@pytest.mark.parametrize("deployed_by, memory, error", [
+    ("agent-cicd", "2Gi", None),
+    (None, "2Gi", "was not created by the pipeline"),
+    ("agent-cicd", "4Gi", "does not match the agent files"),
+])
+def test_manual_rollback_only_restores_the_release_it_was_started_from(tmp_path, monkeypatch, no_wait,
+                                                                        deployed_by, memory, error):
+    from contextlib import contextmanager
+
+    monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", ENV["FOUNDRY_PROJECT_ENDPOINT"])
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+    root = make_agent(tmp_path)
+    released_definition = render_agent(root, "prod", env=ENV, image=retarget(IMAGE, PROD_ACR)).definition
+    source = {"version": "4", "definition": {**released_definition, "memory": memory},
+              "metadata": {"deployed_by": deployed_by, "image_digest": DIGEST}}
+    agents = FakeAgents(statuses=("active",), versions={"4": source})
+
+    @contextmanager
+    def client(endpoint):
+        yield fake_client(agents)
+
+    monkeypatch.setattr(deploy_module, "project_client", client)
+    if error:
+        with pytest.raises(DefinitionError, match=error):
+            deploy_module.rollback(root, "prod", "4", reason="INC-1", require_released=True)
+        assert agents.created == []
+    else:
+        assert deploy_module.rollback(root, "prod", "4", reason="INC-1", require_released=True) == 0
+        assert agents.created[0][2]["rollback_reason"] == "INC-1"
+
+
 # ---------------------------------------------------------------- drift
 
 def released(tmp_path, image=IMAGE, deployed_by="agent-cicd", **changes):
@@ -347,11 +378,10 @@ def test_resized_container_is_drift(tmp_path):
     assert find_drift(expected, "gpt@1", live) == ["Version 9 definition differs from the released files"]
 
 
-def test_rollback_in_prod_is_drift(tmp_path):
+def test_a_rollback_to_the_baseline_release_is_not_drift(tmp_path):
     expected, live = released(tmp_path)
     live["metadata"]["rollback_of"] = "7"
-    assert find_drift(expected, "gpt@1", live) == [
-        "Version 9 is a rollback to version 7: prod does not run the latest release"]
+    assert find_drift(expected, "gpt@1", live) == []
 
 
 def test_hosted_version_without_a_recorded_digest_is_drift(tmp_path):

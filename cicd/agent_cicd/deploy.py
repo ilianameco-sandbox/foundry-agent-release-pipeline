@@ -9,6 +9,7 @@ Examples:
   python -m agent_cicd.deploy --agent-dir agents/my-agent --env dev
   python -m agent_cicd.deploy --agent-dir agents/my-hosted-agent --env dev --image myacr.azurecr.io/my-hosted-agent@sha256:...
   python -m agent_cicd.deploy --agent-dir agents/my-agent --env prod --rollback-to 7
+  python -m agent_cicd.deploy --agent-dir agents/my-agent --env prod --rollback-to 7 --require-released --reason "INC-123"
 """
 
 from __future__ import annotations
@@ -135,19 +136,37 @@ def deploy(agent_dir: Path, environment: str, dry_run: bool, force_new: bool = F
     return 0
 
 
-def rollback(agent_dir: Path, environment: str, target_version: str) -> int:
+def rollback(agent_dir: Path, environment: str, target_version: str, reason: str = "",
+             require_released: bool = False) -> int:
     rendered = render_agent(agent_dir, environment, require_configured=True)
     with project_client(rendered.project_endpoint) as client:
         source = client.agents.get_version(agent_name=rendered.agent_name, agent_version=target_version)
+        source_metadata = source.as_dict().get("metadata") or {}
+        if require_released:
+            from .promote import _canonical, _definition_only
+            if source_metadata.get("deployed_by") != "agent-cicd":
+                raise DefinitionError(f"Version {target_version} of {rendered.agent_name} was not created by the "
+                                      "pipeline; only released versions can be restored")
+            # The version must be the one this release's files describe (the image is checked by digest instead).
+            source_definition = dict(source.as_dict().get("definition") or {})
+            expected = dict(rendered.definition)
+            for definition in (source_definition, expected):
+                definition.pop("container_configuration", None)
+            if _canonical(_definition_only(source_definition)) != _canonical(_definition_only(expected)):
+                raise DefinitionError(f"Version {target_version} does not match the agent files of the checked-out "
+                                      "release; run the rollback from the tag of the release that version came from")
         # Keep what the source version recorded (fingerprint, model, image digest), so the drift check can tell
         # which release prod runs after the rollback.
-        recorded = {key: value for key, value in (source.as_dict().get("metadata") or {}).items()
+        recorded = {key: value for key, value in source_metadata.items()
                     if key in ("fingerprint", "model_version", "image_digest")}
+        metadata = {**recorded, "deployed_by": "agent-cicd", "rollback_of": str(target_version),
+                    "git_sha": os.environ.get("GITHUB_SHA", "local")}
+        if reason.strip():
+            metadata["rollback_reason"] = reason.strip()[:500]
         created = client.agents.create_version(
             agent_name=rendered.agent_name,
             definition=source.definition,
-            metadata={**recorded, "deployed_by": "agent-cicd", "rollback_of": str(target_version),
-                      "git_sha": os.environ.get("GITHUB_SHA", "local")},
+            metadata=metadata,
         )
         if rendered.kind == "hosted":
             wait_until_active(client, rendered.agent_name, str(created.version))
@@ -163,12 +182,15 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="Render the definition without calling Azure")
     parser.add_argument("--image", default="", help="Hosted agents: digest reference of the image built in G1")
     parser.add_argument("--rollback-to", help="Recreate this earlier version as the newest version")
+    parser.add_argument("--reason", default="", help="With --rollback-to: why (recorded on the new version)")
+    parser.add_argument("--require-released", action="store_true",
+                        help="With --rollback-to: refuse a version the pipeline did not create")
     parser.add_argument("--force-new-version", action="store_true",
                         help="Create a version even when the latest one has the same fingerprint")
     args = parser.parse_args()
     try:
         if args.rollback_to:
-            return rollback(args.agent_dir, args.env, args.rollback_to)
+            return rollback(args.agent_dir, args.env, args.rollback_to, args.reason, args.require_released)
         return deploy(args.agent_dir, args.env, args.dry_run, args.force_new_version, args.image or None)
     except (DefinitionError, RuntimeError) as error:
         print(f"ERROR: {error}", file=sys.stderr)
