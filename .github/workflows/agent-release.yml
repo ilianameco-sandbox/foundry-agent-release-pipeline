@@ -1,6 +1,9 @@
 # Agent release pipeline for one agent (cicd/agents/my-agent): dev -> test/UAT -> prod.
 # To add another agent: copy this file and replace "my-agent" everywhere (agent folder, tag prefix, concurrency groups).
-#   G1  ci                every PR and push: secret scan, dependency scan, unit tests, render every env, validate rules
+# Prompt and hosted agents use the same file: agent.json "kind" decides. A hosted agent's image is built and
+# scanned in G1, pushed once by the dev deploy, and the same digest is promoted to test and prod.
+#   G1  ci                every PR and push: secret scan, dependency scan, unit tests, render every env, validate rules;
+#                         hosted agents: image build + vulnerability scan (PRs here; releases in the dev deploy, + SBOM)
 #   G2  (inside deploys)  config & residency check against policy.json before every deploy (dev, test, prod)
 #   G3  quality-gate      push to main + release tags: Foundry evaluation of the dev version, incl. privacy (PII),
 #                         protected material and groundedness; reused when agent, cases and judges are unchanged
@@ -40,11 +43,14 @@ permissions:
 env:
   AGENT_DIR: agents/my-agent
   GITLEAKS_VERSION: "8.30.1"
+  TRIVY_VERSION: "0.76.2"
 
 jobs:
   ci:
     name: "G1: code & security"
     runs-on: ubuntu-latest
+    outputs:
+      kind: ${{ steps.kind.outputs.kind }}
     defaults:
       run:
         working-directory: cicd
@@ -64,10 +70,16 @@ jobs:
             | tar -xz gitleaks
           ./gitleaks git --redact --no-banner --exit-code 1 .
       - run: pip install -r requirements.txt pytest==8.4.2 pip-audit==2.10.1
+      - name: Agent kind (agent.json); hosted agents need a Dockerfile in their source folder
+        id: kind
+        run: python -m agent_cicd.image --agent-dir "$AGENT_DIR" --require-source
       - name: Dependency scan (pip-audit, known vulnerabilities in pinned packages)
         run: pip-audit -r requirements.txt --progress-spinner off
       - name: Unit tests (gate logic, rules, definition rendering, approval packet)
         run: python -m pytest tests -q
+      - name: "Hosted agent: build the image and scan it (pull request; nothing is pushed)"
+        if: steps.kind.outputs.kind == 'hosted' && github.event_name == 'pull_request'
+        run: bash ../.github/scripts/build-scan-image.sh "$AGENT_DIR" "pr-${{ github.event.pull_request.number }}" out/sbom.cdx.json
       - name: Render every environment without deploying (endpoints come from GitHub Environment secrets, unset here)
         run: |
           for env in dev test prod; do python -m agent_cicd.deploy --agent-dir "$AGENT_DIR" --env "$env" --dry-run > /dev/null; done
@@ -81,7 +93,7 @@ jobs:
           python -m agent_cicd.release_decision --agent-dir "$AGENT_DIR" --validate-only
 
   deploy-dev:
-    name: "Deploy to dev (G2 + smoke)"
+    name: "Deploy to dev (G2 + smoke; hosted: build, scan, push)"
     if: github.event_name != 'pull_request'
     needs: ci
     concurrency:
@@ -92,6 +104,7 @@ jobs:
     with:
       environment: dev
       agent_dir: agents/my-agent
+      build_image: true
 
   quality-gate:
     name: "G3: automated evaluation"
@@ -105,6 +118,7 @@ jobs:
       cancel-in-progress: false
     env:
       FOUNDRY_PROJECT_ENDPOINT: ${{ secrets.FOUNDRY_PROJECT_ENDPOINT }}
+      AZURE_CONTAINER_REGISTRY: ${{ vars.AZURE_CONTAINER_REGISTRY }}
     defaults:
       run:
         working-directory: cicd
@@ -147,6 +161,8 @@ jobs:
     with:
       environment: test
       agent_dir: agents/my-agent
+      # Hosted agents: the exact image dev was evaluated on (unused for prompt agents)
+      image: ${{ needs.deploy-dev.outputs.image }}
 
   redteam-gate:
     name: "G4: AI red teaming (test)"
@@ -163,6 +179,7 @@ jobs:
       actions: read
     env:
       FOUNDRY_PROJECT_ENDPOINT: ${{ secrets.FOUNDRY_PROJECT_ENDPOINT }}
+      AZURE_CONTAINER_REGISTRY: ${{ vars.AZURE_CONTAINER_REGISTRY }}
     defaults:
       run:
         working-directory: cicd
@@ -300,6 +317,7 @@ jobs:
       issues: write
     env:
       FOUNDRY_PROJECT_ENDPOINT: ${{ secrets.FOUNDRY_PROJECT_ENDPOINT }}
+      AZURE_CONTAINER_REGISTRY: ${{ vars.AZURE_CONTAINER_REGISTRY }}
       AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
     defaults:
       run:
@@ -369,7 +387,7 @@ jobs:
   deploy-prod:
     name: "G6: release manager approves, deploy to prod (G2 + smoke)"
     if: startsWith(github.ref, 'refs/tags/my-agent-v')
-    needs: release-decision
+    needs: [release-decision, deploy-test]
     concurrency:
       group: my-agent-prod-deploy
       cancel-in-progress: false
@@ -379,3 +397,5 @@ jobs:
       environment: prod
       agent_dir: agents/my-agent
       rollback_on_smoke_failure: true
+      # Hosted agents: the exact image that passed test, red teaming and UAT
+      image: ${{ needs.deploy-test.outputs.image }}

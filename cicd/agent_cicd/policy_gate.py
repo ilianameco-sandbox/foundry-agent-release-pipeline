@@ -31,6 +31,7 @@ from .gates import FAIL, PASS, REVIEW, GateResult
 PRESETS_DIR = Path(__file__).resolve().parent.parent / "policies" / "presets"
 ARM = "https://management.azure.com"
 COGNITIVE_API = "2025-06-01"
+REGISTRY_API = "2023-07-01"
 RULES = ("model_region", "model_deployment_type", "data_store_region", "content_filter", "prompt_shields",
          "key_auth_disabled", "private_network", "tracing_enabled")
 SEVERITIES = ("block", "warn", "off")
@@ -240,8 +241,12 @@ def _prompt_shields(get, account_path: str, rai_policy: str | None) -> bool | No
 
 
 def collect_facts(endpoint: str, deployments: list[str], resource_group: str, subscription: str,
-                  get: Callable[[str, str], dict[str, Any] | None]) -> dict[str, Any]:
-    """Read only what the rules need, with the pipeline's own (read-only) identity."""
+                  get: Callable[[str, str], dict[str, Any] | None], container_registry: str = "") -> dict[str, Any]:
+    """Read only what the rules need, with the pipeline's own (read-only) identity.
+
+    `container_registry` (hosted agents) is the registry login server; it is checked like a data store, because
+    the agent's code is stored there.
+    """
     host = urlparse(endpoint).hostname or ""
     account_name = host.split(".")[0]
     project = endpoint.rstrip("/").split("/projects/")[-1]
@@ -281,6 +286,14 @@ def collect_facts(endpoint: str, deployments: list[str], resource_group: str, su
         facts["data_stores"].append({"name": resource_id.rsplit("/", 1)[-1] if resource_id else connection.get("name"),
                                      "kind": kind, "location": location})
         facts["tracing"] = facts["tracing"] or kind == "app_insights"
+    if container_registry:
+        registries = get(f"/subscriptions/{subscription}/providers/Microsoft.ContainerRegistry/registries",
+                         REGISTRY_API) or {}
+        found = next((r for r in registries.get("value") or []
+                      if str((r.get("properties") or {}).get("loginServer", "")).lower() == container_registry.lower()),
+                     None)
+        facts["data_stores"].append({"name": container_registry, "kind": "container_registry",
+                                     "location": (found or {}).get("location")})
     return facts
 
 
@@ -325,8 +338,9 @@ def main() -> int:
         return 1
     try:
         facts = collect_facts(rendered.project_endpoint,
-                              [rendered.definition["model"], rendered.judge_deployment],
-                              resource_group, _subscription(), arm_getter(_arm_token()))
+                              [rendered.model_deployment, rendered.judge_deployment],
+                              resource_group, _subscription(), arm_getter(_arm_token()),
+                              container_registry=rendered.container_registry)
         result = evaluate(policy, facts, args.env)
     except PolicyError as error:
         result = GateResult(gate="policy", outcome=FAIL, reasons=[str(error)],

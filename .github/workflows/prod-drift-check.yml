@@ -23,6 +23,7 @@ jobs:
     env:
       AGENT_DIR: agents/my-agent
       FOUNDRY_PROJECT_ENDPOINT: ${{ secrets.FOUNDRY_PROJECT_ENDPOINT }}
+      AZURE_CONTAINER_REGISTRY: ${{ vars.AZURE_CONTAINER_REGISTRY }}
     defaults:
       run:
         working-directory: cicd

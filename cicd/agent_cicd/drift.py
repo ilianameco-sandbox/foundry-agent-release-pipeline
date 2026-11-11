@@ -3,8 +3,11 @@
 Compares the latest prod agent version with the files at the checked-out ref (the workflow checks out the
 newest release tag) and flags:
   * a version created outside the pipeline (someone edited the agent in the portal or with the SDK),
+  * a rollback (prod went back to an earlier version after a failed release),
   * a definition that differs from the released files,
-  * a model deployment upgraded since the release (same agent, different model version).
+  * a model deployment upgraded since the release (same agent, different model version),
+  * (hosted agents) a container image other than the one the pipeline deployed. The image digest is not in
+    the repo files, so it is compared with the digest the pipeline recorded on the version.
 
 Example:
   python -m agent_cicd.drift --agent-dir agents/my-agent --env prod --report out/drift.json
@@ -18,7 +21,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .definition import fingerprint, render_agent
+from .definition import fingerprint, image_digest, render_agent
 from .deploy import _model_version
 from .foundry import add_summary, project_client, set_outputs, write_report
 from .promote import _canonical, _definition_only
@@ -28,10 +31,24 @@ def find_drift(expected: dict[str, Any], expected_model_version: str, live: dict
     """Pure comparison; `live` is the latest version as returned by Foundry (as_dict)."""
     findings = []
     metadata = live.get("metadata") or {}
+    live_definition = live.get("definition") or {}
     if metadata.get("deployed_by") != "agent-cicd":
         findings.append(f"Version {live.get('version')} was not created by the pipeline "
                         "(edited in the Foundry portal or with the SDK)")
-    if _canonical(_definition_only(live.get("definition") or {})) != _canonical(_definition_only(expected)):
+    elif metadata.get("rollback_of"):
+        findings.append(f"Version {live.get('version')} is a rollback to version {metadata['rollback_of']}: prod does "
+                        "not run the latest release")
+    if expected.get("kind") == "hosted" and "container_configuration" not in expected:
+        live_digest = image_digest(live_definition)
+        if not metadata.get("image_digest"):
+            findings.append(f"Version {live.get('version')} has no recorded image digest, so its image can't be "
+                            "matched to a release")
+        elif live_digest != metadata["image_digest"]:
+            findings.append(f"Version {live.get('version')} runs image {live_digest or 'unknown'}, not "
+                            f"{metadata['image_digest']} that the pipeline deployed")
+        if live_definition.get("container_configuration"):
+            expected = {**expected, "container_configuration": live_definition["container_configuration"]}
+    if _canonical(_definition_only(live_definition)) != _canonical(_definition_only(expected)):
         findings.append(f"Version {live.get('version')} definition differs from the released files")
     released_model = metadata.get("model_version")
     if released_model and released_model != expected_model_version:
@@ -53,7 +70,7 @@ def main() -> int:
 
     rendered = render_agent(args.agent_dir, args.env, require_configured=True)
     with project_client(rendered.project_endpoint) as client:
-        model_version = _model_version(client, rendered.definition["model"])
+        model_version = _model_version(client, rendered.model_deployment)
         details = client.agents.get(agent_name=rendered.agent_name).as_dict()
         live = (details.get("versions") or {}).get("latest") or {}
     findings = find_drift(rendered.definition, model_version, live)

@@ -1,0 +1,7 @@
+{
+  "_about": "Data residency and security rules for this agent (G2). Pick the preset that matches your requirements (cicd/policies/presets), override single rules below, and keep enforcement 'warn' until the resources meet the preset; then switch to 'enforce'.",
+  "preset": "permissive",
+  "enforcement": "warn",
+  "owner": "<team that owns the residency and security rules>",
+  "rules": {}
+}

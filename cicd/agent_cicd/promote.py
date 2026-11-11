@@ -30,6 +30,7 @@ from .definition import DefinitionError, VARIABLE, _read_json, _substitute, rend
 from .foundry import add_summary, project_client, set_outputs
 
 RENDERED_FIELDS = {"kind", "model", "instructions", "tools", "reasoning"}
+HOSTED_FIELDS = {"kind", "cpu", "memory", "environment_variables", "container_configuration", "protocol_versions"}
 # Values like these differ between dev and prod; left as literals they would point prod at dev resources.
 ENV_SPECIFIC = re.compile(r"https?://|/versions/|/connections/|/subscriptions/|azureml://|azureai://|"
                           r"\.search\.windows\.net|\.services\.ai\.azure\.com|\.openai\.azure\.com")
@@ -67,7 +68,8 @@ def portal_to_files(definition: dict[str, Any], agent: dict[str, Any], config: d
     """Return (new agent.json, new instructions) for a portal definition, or raise PromoteError."""
     problems = []
     if definition.get("kind") != "prompt":
-        problems.append(f"kind is '{definition.get('kind')}'; this pipeline only handles prompt agents")
+        problems.append(f"kind is '{definition.get('kind')}'; only prompt agents are built in the portal. Hosted "
+                        "agents are changed in their source code (src/) and released through the pipeline")
     if definition.get("model") != config.get("model_deployment"):
         problems.append(f"model deployment is '{definition.get('model')}' but config uses "
                         f"'{config.get('model_deployment')}'. Change model_deployment in config/dev.json and "
@@ -104,7 +106,8 @@ def _canonical(value: Any) -> str:
 
 
 def _definition_only(definition: dict[str, Any]) -> dict[str, Any]:
-    kept = {k: v for k, v in definition.items() if k in RENDERED_FIELDS and v not in (None, "", [], {})}
+    fields = HOSTED_FIELDS if definition.get("kind") == "hosted" else RENDERED_FIELDS
+    kept = {k: v for k, v in definition.items() if k in fields and v not in (None, "", [], {})}
     if isinstance(kept.get("instructions"), str):
         kept["instructions"] = kept["instructions"].rstrip("\n")
     return kept
@@ -156,6 +159,13 @@ def pr_body(agent_name: str, version: dict[str, Any], old_agent: dict, new_agent
 def promote(agent_dir: Path, environment: str, version: str, agent_name: str | None, dry_run: bool,
             body_path: Path | None) -> int:
     rendered = render_agent(agent_dir, environment, require_configured=True)
+    if rendered.kind != "prompt":
+        message = (f"{agent_dir.name} is a {rendered.kind} agent: its code lives in the repo (src/), so there is "
+                   "nothing to export from the portal. Change the code and release it through the pipeline.")
+        print(message, file=sys.stderr)
+        add_summary(f"### ❌ Not promoted\n\n{message}\n")
+        set_outputs(changed="false", source_version=version)
+        return 1
     raw_config = _read_json(agent_dir / "config" / f"{environment}.json")
     config = _substitute(raw_config, {}, set())
     agent_path = agent_dir / "agent.json"

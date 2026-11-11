@@ -1,0 +1,9 @@
+{
+  "project_endpoint": "${FOUNDRY_PROJECT_ENDPOINT}",
+  "azure_resource_group": "<resource group of the Foundry account>",
+  "agent_name": "<agent name in Foundry>",
+  "model_deployment": "<model deployment the agent's code calls>",
+  "judge_deployment": "<judge model deployment name>",
+  "container_registry": "${AZURE_CONTAINER_REGISTRY}",
+  "variables": {}
+}

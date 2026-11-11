@@ -354,7 +354,9 @@ def main() -> int:
             set_outputs(candidates=str(len(candidates)))
             return 0
 
-        instructions = rendered.definition["instructions"]
+        # Hosted agents keep their behaviour in code; agent.json "description" stands in for the instructions.
+        instructions = (rendered.definition.get("instructions") or rendered.description
+                        or "Not available (hosted agent): infer the intended behaviour from the example categories.")
         examples: dict[str, str] = {}
         for row in dataset:
             examples.setdefault(row["category"], row["expected_behavior"])

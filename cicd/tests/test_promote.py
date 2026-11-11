@@ -51,7 +51,7 @@ def test_new_dev_only_resources_stop_the_export_instead_of_reaching_prod():
 @pytest.mark.parametrize("change, message", [
     ({"model": "gpt-6"}, "model deployment is 'gpt-6'"),
     ({"temperature": 0.2}, "sets temperature"),
-    ({"kind": "hosted"}, "only handles prompt agents"),
+    ({"kind": "hosted"}, "only prompt agents are built in the portal"),
     ({"instructions": "  "}, "no instructions"),
 ])
 def test_unsupported_changes_need_a_human(change, message):

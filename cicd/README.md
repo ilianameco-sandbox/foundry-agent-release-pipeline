@@ -1,11 +1,11 @@
 # Agent release pipeline: dev → test/UAT → prod with security, residency, evaluation, red-team and human gates
 
-GitHub Actions pipeline that takes a Foundry prompt agent from code to production, following the [pipeline design](../docs/release-pipeline.drawio).
+GitHub Actions pipeline that takes a Foundry agent (prompt or [hosted](#hosted-agents)) from code to production, following the [pipeline design](../docs/release-pipeline.drawio).
 Every release has to pass security scans, the agent's residency rules, a two-suite evaluation with Responsible AI checks, and AI red teaming in a prod-like test project. Then QA, the business owner (after user acceptance testing) and a Responsible AI reviewer sign off, and the release manager approves prod.
 
 | Gate | Job | Runs on | Passes when |
 |---|---|---|---|
-| G1 | `ci` | every PR and push | no secrets in git history (gitleaks), no known-vulnerable pinned packages (pip-audit), unit tests pass, every environment renders, all rule files are valid |
+| G1 | `ci` | every PR and push | no secrets in git history (gitleaks), no known-vulnerable pinned packages (pip-audit), unit tests pass, every environment renders, all rule files are valid. Hosted agents: the image builds and has no fixable HIGH/CRITICAL vulnerabilities (Trivy) |
 | G2 | inside every deploy | before each deploy to dev, test and prod | the environment's Azure setup meets the rules in `policy.json` (model region and deployment type, data-store regions, content filter, Prompt Shields, key auth, network, tracing). See [G2](#g2-residency-and-security-rules-policyjson) |
 | — | `deploy-dev` | push to `main`, release tags | a new version is created in the dev project (only if its definition or model changed) and passes the smoke checks |
 | G3 | `quality-gate` | push to `main`, release tags | Foundry evaluation of that dev version: every must-pass case passes and every judge, including privacy and groundedness, meets its pass bar. Reused when nothing that affects the result changed |
@@ -70,9 +70,50 @@ The template ships 13 generic must-pass behavior cases (scope, authority, prompt
 
 **More than one agent.** Copy the agent folder, copy `.github/workflows/agent-release.yml`, and replace `my-agent` in the copy (agent folder, tag prefix and concurrency groups). Each agent gets its own release tags, such as `billing-agent-v1.0.0`.
 
+## Hosted agents
+
+A hosted agent is your own code (Microsoft Agent Framework, LangGraph, or any framework) running in a container that Foundry hosts. The pipeline tells the two kinds apart by `"kind"` in `agent.json`, so the same `agent-release.yml` releases either: point `AGENT_DIR` at the agent's folder. Start from [agents/my-hosted-agent/](agents/my-hosted-agent/) and put the code and its `Dockerfile` in `src/` (its [README](agents/my-hosted-agent/src/README.md) lists what the image must do).
+
+**Build once, promote by digest.** Every environment runs the exact image that was tested:
+
+1. **G1, pull requests:** the image is built and scanned with [Trivy](https://trivy.dev); fixable HIGH or CRITICAL vulnerabilities fail the check. Nothing is pushed.
+2. **Dev deploy:** after G2 passes, the image is built and scanned again, a CycloneDX SBOM is saved as the `image-sbom` artifact, and the image is pushed to the dev registry. The deploy uses its digest (`<registry>/<repository>@sha256:…`), never a tag, because a tag can later point to another image.
+3. **Test and prod deploys** get that digest from the deploy before them. If an environment has its own registry, the image is copied there with `az acr import`. The manifest doesn't change, so the digest, and the agent's fingerprint, stay the same in dev, test and prod.
+4. **Each deploy** creates a hosted version, waits until Foundry reports it `active` (up to 30 minutes), then runs the smoke checks. Prod rolls back to the previous version if the version fails to start or the smoke checks fail. A version that never became active is replaced on the next run, never reused.
+
+**agent.json for a hosted agent:**
+
+| Field | Meaning |
+|---|---|
+| `kind` | `"hosted"` |
+| `description` | What the agent does and must refuse. Used instead of instructions when drafting test cases from traces |
+| `source_dir`, `dockerfile` | Build context and Dockerfile (default `src` and `Dockerfile`) |
+| `image_repository` | Registry repository name (default: the agent folder name) |
+| `cpu`, `memory` | Container size, such as `"1"` and `"2Gi"` |
+| `protocols` | At least `{"protocol": "responses", "version": "1.0.0"}`; the gates call the agent through it |
+| `environment_variables` | Settings for the container. `${MODEL_DEPLOYMENT}` is the environment's `model_deployment`; other `${NAME}` values come from `config/<env>.json` `variables`. `FOUNDRY_*` and `AGENT_*` are refused because Foundry sets them. Never put secrets here |
+
+`config/<env>.json` adds `container_registry` (the registry login server, from the GitHub Environment variable `${AZURE_CONTAINER_REGISTRY}`). `model_deployment` names the model the code calls; G2 checks its region and type, and its version is part of the fingerprint.
+
+**What changes for hosted agents:**
+- **G2** also checks the registry's region (with the data stores), because the agent's code is stored there.
+- **The drift check** can't read the image from the repo. Instead it checks that prod runs the digest the pipeline recorded on the version, and that nothing else (size, settings, protocols) changed.
+- **Promote from the portal** doesn't apply: a hosted agent's code lives in `src/`. The workflow stops with an explanation.
+- **Behavior lives in the code,** so code review and the evaluation dataset carry more weight than for a prompt agent: there are no instructions for reviewers to read.
+
+### To verify on the first live run
+
+The hosted path is unit-tested and dry-run validated, but not yet proven against a live Foundry project. Release one hosted agent through non-production Foundry projects and check:
+
+- [ ] **Evaluation (G3) and red teaming (G4) can target a hosted version** (`azure_ai_agent` target with name and version).
+- [ ] **Smoke checks reach the new version.** They call the agent with an `agent_reference` (name + version) on the project's Responses endpoint. If hosted agents only answer on their own endpoint (`{project}/agents/{name}/endpoint/protocols/openai`), switch `smoke.py` to `get_openai_client(agent_name=…)`. Then check which version the endpoint routes to.
+- [ ] **UAT ratings and trace harvesting find hosted traces.** Both read `invoke_agent` spans from App Insights `dependencies`; hosted agents also log to `requests` (`azure.ai.agentserver.*`), so the KQL may need that table.
+- [ ] **A rebuilt identical commit** creates a new version only when the digest changes. Docker builds are rarely byte-identical, so expect one new version per release.
+- [ ] **Registry permissions:** the Foundry project's identity can pull from each environment's registry, and each pipeline identity can import into it.
+
 ## G1: code & security
 
-The `ci` job scans the whole git history with [gitleaks](https://github.com/gitleaks/gitleaks) and the pinned Python packages with [pip-audit](https://pypi.org/project/pip-audit/). A finding fails the job before anything is deployed.
+The `ci` job scans the whole git history with [gitleaks](https://github.com/gitleaks/gitleaks) and the pinned Python packages with [pip-audit](https://pypi.org/project/pip-audit/). For a hosted agent it also needs a `Dockerfile` in the source folder; on pull requests it builds the image and scans it with Trivy ([.github/scripts/build-scan-image.sh](../.github/scripts/build-scan-image.sh)). A finding fails the job before anything is deployed.
 
 ## G2: residency and security rules (policy.json)
 
@@ -196,8 +237,10 @@ The approval is the GitHub environment, not the 👍: a rating can't block anyth
 
 `prod-drift-check.yml` runs daily (once you set the repository variable `ENABLE_PROD_DRIFT_CHECK` to `true`) and on demand, with the prod identity in the `prod-monitor` environment, which has no reviewer and is limited to `main`. It compares the latest prod version with the agent files of the last successful prod deployment and opens a "Prod drift" issue if:
 - the version wasn't created by the pipeline;
+- prod was rolled back to an earlier version after a failed release;
 - its definition differs from the release;
-- the model deployment was upgraded since the release.
+- the model deployment was upgraded since the release;
+- (hosted agents) it runs a different image digest than the one the pipeline deployed.
 
 It closes the issue when prod matches again.
 
@@ -219,17 +262,21 @@ cicd/
     eval/smoke.json       post-deploy smoke checks
     eval/uat.json         UAT evidence rules (minimum ratings, thumbs-up rate)
     eval/harvest.json     trace harvest settings
+  agents/my-hosted-agent/ hosted-agent template: agent.json (kind "hosted"), config/ (+ container_registry), eval/,
+                          policy.json, governance.json, src/ (your code and Dockerfile)
   policies/presets/       canada-strict, eu-data-zone, us-standard, permissive
   agent_cicd/             deploy, smoke, quality_gate, redteam_gate, policy_gate, uat_evidence, release_decision,
-                          release_report, drift, promote, harvest + pure gate logic (gates.py)
+                          release_report, drift, promote, harvest, image (hosted build info, promotion by digest)
+                          + pure gate logic (gates.py)
   tests/                  offline unit tests (fixtures in tests/fixtures)
 .github/workflows/
-  agent-release.yml       the pipeline for one agent
-  agent-deploy.yml        reusable deploy (G2 → create version → record → smoke → optional rollback)
+  agent-release.yml       the pipeline for one agent (prompt or hosted)
+  agent-deploy.yml        reusable deploy (G2 → hosted: build, scan, push → create version → record → smoke → optional rollback)
   prod-drift-check.yml    daily: prod vs the last release
   promote-portal-agent.yml  manual: agent version built in the Foundry portal → pull request
   harvest-traces.yml      manual: real conversations → candidate test cases → pull request
-.github/scripts/release-issue.sh  posts a report to the release's approval issue
+.github/scripts/release-issue.sh     posts a report to the release's approval issue
+.github/scripts/build-scan-image.sh  hosted agents: build the image, Trivy scan, SBOM
 ```
 
 ## One-time setup
@@ -253,7 +300,12 @@ cicd/
    - **Repository:** a tag ruleset protecting `my-agent-v*`, and approval required for workflows from fork PRs.
    - **Private repos:** required reviewers need GitHub Enterprise.
 5. **CODEOWNERS.** Replace the placeholder teams in `.github/CODEOWNERS` and make code-owner review required with a branch ruleset on `main`.
-6. **Optional.** Add an environment secret `TEAMS_WEBHOOK_URL` for the Teams card. Set the repository variable `ENABLE_PROD_DRIFT_CHECK` to `true` once prod is live.
+6. **Hosted agents only: container registries.** One Azure Container Registry per environment, or one shared by all of them. Use Premium with the admin user off if you need private endpoints. Put each registry in a region your residency rules allow; G2 checks it.
+   - Set the **variable** `AZURE_CONTAINER_REGISTRY` (login server, such as `myregistry.azurecr.io`) on the `dev`, `test`, `prod` and `prod-monitor` environments.
+   - Each Foundry project's managed identity needs **AcrPull** on its environment's registry, or the hosted version fails to start.
+   - The dev pipeline identity needs **AcrPush** on the dev registry. With separate registries, the test and prod identities need **Container Registry Data Importer and Data Reader** (or a role with `Microsoft.ContainerRegistry/registries/importImage/action`; AcrPush is not enough for `az acr import`) on their own registry, and **AcrPull** on the registry they import from (dev for test, test for prod). With one shared registry, nothing is copied.
+   - All identities need **Reader** on the registries, so G2 can read their regions.
+7. **Optional.** Add an environment secret `TEAMS_WEBHOOK_URL` for the Teams card. Set the repository variable `ENABLE_PROD_DRIFT_CHECK` to `true` once prod is live.
 
 ## Day to day
 
@@ -298,6 +350,9 @@ python -m pip install -r requirements.txt pytest==8.4.2
 python -m pytest tests -q
 python -m agent_cicd.deploy --agent-dir agents/my-agent --env dev --dry-run
 python -m agent_cicd.quality_gate --agent-dir agents/my-agent --env dev --validate-only
+# Hosted agent: kind and build info, then render with an image digest (no Azure calls):
+python -m agent_cicd.image --agent-dir agents/my-hosted-agent
+python -m agent_cicd.deploy --agent-dir agents/my-hosted-agent --env dev --dry-run --image "<registry>/my-hosted-agent@sha256:<digest>"
 # Re-decide saved reports after changing gate rules (no Azure calls):
 python -m agent_cicd.quality_gate --agent-dir agents/my-agent --env dev --from-report out/quality.json
 python -m agent_cicd.redteam_gate --agent-dir agents/my-agent --env dev --results-file "<results>.jsonl"
