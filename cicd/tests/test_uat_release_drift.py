@@ -126,6 +126,14 @@ def test_missing_or_rejected_signoff_fails():
     assert any("rejected by rai" in r for r in decide_release(GOV, approvals, jobs, "dev", NOW).reasons)
 
 
+def test_old_signoff_expires_even_when_a_similar_environment_signed_recently():
+    gov = {"signoffs": {"lead": {"title": "Lead", "environment": "signoff"},
+                        "rai": {"title": "RAI", "environment": "signoff-rai"}}, "max_signoff_age_days": 14}
+    approvals = [approval("signoff", "lead"), approval("signoff-rai", "rai")]
+    result = decide_release(gov, approvals, [job("signoff", 20), job("signoff-rai", 1)], author="dev", now=NOW)
+    assert result.outcome == FAIL and any(r.startswith("Lead: expired") for r in result.reasons)
+
+
 def test_old_signoff_expires():
     approvals, jobs = all_signed(ages=(1, 20, 1))
     result = decide_release(GOV, approvals, jobs, author="dev", now=NOW)

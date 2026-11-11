@@ -1,12 +1,15 @@
 # Trace harvest: real conversations -> candidate test cases -> pull request for human review.
 # Candidates are appended to eval/dataset.jsonl with "needs_review": true; Gate 1a rejects that flag,
 # so nothing reaches the quality gate until a reviewer accepts (removes the flag) or deletes each case.
-# The weekly schedule is off by default; uncomment it once the agent has real users, or run it by hand.
-name: harvest-traces
+# Generated from cicd/agents/{= agent =}/pipeline.yaml by `python -m agent_cicd.generate`: edit that file, not this one.
+# Set harvest.schedule there once the agent has real users; until then run it by hand.
+name: {= agent =}-harvest-traces
 
 on:
-  # schedule:
-  #   - cron: "0 11 * * 1"   # Mondays 11:00 UTC
+{% if harvest_cron %}
+  schedule:
+    - cron: "{= harvest_cron =}"
+{% endif %}
   workflow_dispatch:
     inputs:
       days:
@@ -22,11 +25,11 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: harvest-traces
+  group: {= agent =}-harvest-traces
   cancel-in-progress: false
 
 env:
-  AGENT_DIR: agents/my-agent
+  AGENT_DIR: agents/{= agent =}
 
 jobs:
   harvest:

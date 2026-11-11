@@ -1,10 +1,13 @@
 # Daily check that prod still runs exactly what the last release approved (diagram: "Drift & monitoring").
+# Generated from cicd/agents/{= agent =}/pipeline.yaml by `python -m agent_cicd.generate`: edit that file, not this one.
 # Uses the prod identity through the `prod-monitor` environment (no reviewer, main branch only) and only reads.
-name: prod-drift-check
+name: {= agent =}-prod-drift-check
 
 on:
+{% if drift_cron %}
   schedule:
-    - cron: "17 6 * * *"
+    - cron: "{= drift_cron =}"
+{% endif %}
   workflow_dispatch:
 
 permissions:
@@ -21,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: prod-monitor
     env:
-      AGENT_DIR: agents/my-agent
+      AGENT_DIR: agents/{= agent =}
       FOUNDRY_PROJECT_ENDPOINT: ${{ secrets.FOUNDRY_PROJECT_ENDPOINT }}
       AZURE_CONTAINER_REGISTRY: ${{ vars.AZURE_CONTAINER_REGISTRY }}
     defaults:
@@ -31,21 +34,23 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
-      # Baseline = the last ref the `prod` environment deployed successfully (a newer tag may still be waiting
-      # for sign-off, or may have been rejected or rolled back). Pipeline code stays on main.
+      # Baseline = the last {= agent =} release tag the `prod` environment deployed successfully (a newer tag may still be waiting
+      # for sign-off, or may have been rejected or rolled back). Other agents deploy to `prod` too, so only this agent's tags count.
+      # Pipeline code stays on main.
       - name: Use the agent files from the last successful prod deployment
         id: tag
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag=""
-          for id in $(gh api "repos/${GITHUB_REPOSITORY}/deployments?environment=prod&per_page=30" --jq '.[].id'); do
+          for id in $(gh api "repos/${GITHUB_REPOSITORY}/deployments?environment=prod&per_page=100" \
+                      --jq '.[] | select(.ref | startswith("{= tag_prefix =}")) | .id'); do
             state=$(gh api "repos/${GITHUB_REPOSITORY}/deployments/${id}/statuses?per_page=1" --jq '.[0].state // ""')
             if [ "$state" = "success" ]; then
               tag=$(gh api "repos/${GITHUB_REPOSITORY}/deployments/${id}" --jq '.ref'); break
             fi
           done
-          [ -n "$tag" ] || { echo "::error::No successful prod deployment found"; exit 1; }
+          [ -n "$tag" ] || { echo "::error::No successful prod deployment of a {= tag_prefix =}* release found"; exit 1; }
           git fetch --tags --quiet
           git checkout "$tag" -- "$AGENT_DIR/agent.json" "$AGENT_DIR/instructions.md" "$AGENT_DIR/config/prod.json"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"

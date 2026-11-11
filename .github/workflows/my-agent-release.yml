@@ -1,5 +1,5 @@
 # Agent release pipeline for one agent (cicd/agents/my-agent): dev -> test/UAT -> prod.
-# To add another agent: copy this file and replace "my-agent" everywhere (agent folder, tag prefix, concurrency groups).
+# Generated from cicd/agents/my-agent/pipeline.yaml by `python -m agent_cicd.generate`: edit that file, not this one.
 # Prompt and hosted agents use the same file: agent.json "kind" decides. A hosted agent's image is built and
 # scanned in G1, pushed once by the dev deploy, and the same digest is promoted to test and prod.
 #   G1  ci                every PR and push: secret scan, dependency scan, unit tests, render every env, validate rules;
@@ -10,21 +10,21 @@
 #   --  deploy-test       release tags (or manual force_redteam): the release candidate goes to the test/UAT project
 #   G4  redteam-gate      AI red teaming of the test version (identity persona tests are not built yet)
 #   --  release-packet    one approval packet: every gate, residency findings, Responsible AI scorecard
-#   G5  signoff-*         release tags: QA, business owner and RAI reviewer each approve their GitHub environment;
-#       uat-evidence      after the business sign-off: checks testers rated enough answers of the test version
+#   G5  signoff-*         release tags: each role approves its own GitHub environment (QA, Business owner (UAT) and Responsible AI reviewer);
+#       uat-evidence      after the Business owner (UAT) sign-off: checks testers rated enough answers of the test version
 #   G6  release-decision  checks every sign-off is present and recent, then the release manager approves `prod`
 name: my-agent-release
 
 on:
   pull_request:
-    paths: ["cicd/**", "!cicd/**/*.md", ".github/workflows/agent-release.yml", ".github/workflows/agent-deploy.yml",
+    paths: ["cicd/**", "!cicd/**/*.md", ".github/workflows/my-agent-release.yml", ".github/workflows/agent-deploy.yml",
             ".github/scripts/**"]
   push:
     branches: [main]
     # Docs-only changes don't deploy or evaluate; tag pushes ignore path filters.
-    paths: ["cicd/**", "!cicd/**/*.md", ".github/workflows/agent-release.yml", ".github/workflows/agent-deploy.yml",
+    paths: ["cicd/**", "!cicd/**/*.md", ".github/workflows/my-agent-release.yml", ".github/workflows/agent-deploy.yml",
             ".github/scripts/**"]
-    tags: ["my-agent-v*"]
+    tags: ["my-agent-v[0-9]*"]
   workflow_dispatch:
     inputs:
       force_redteam:
@@ -70,6 +70,8 @@ jobs:
             | tar -xz gitleaks
           ./gitleaks git --redact --no-banner --exit-code 1 .
       - run: pip install -r requirements.txt pytest==8.4.2 pip-audit==2.10.1
+      - name: Workflows and settings match every agent's pipeline.yaml (edit pipeline.yaml, then run the generator)
+        run: python -m agent_cicd.generate --check
       - name: Agent kind (agent.json); hosted agents need a Dockerfile in their source folder
         id: kind
         run: python -m agent_cicd.image --agent-dir "$AGENT_DIR" --require-source
@@ -289,22 +291,22 @@ jobs:
       - run: echo "QA signed off ${GITHUB_REF_NAME} (see the approval packet)" >> "$GITHUB_STEP_SUMMARY"
 
   signoff-rai:
-    name: "G5 sign-off: Responsible AI (signoff-rai)"
+    name: "G5 sign-off: Responsible AI reviewer (signoff-rai)"
     if: startsWith(github.ref, 'refs/tags/my-agent-v') && needs.release-packet.outputs.ready == 'true'
     needs: release-packet
     runs-on: ubuntu-latest
     environment: signoff-rai
     steps:
-      - run: echo "Responsible AI reviewer signed off ${GITHUB_REF_NAME}" >> "$GITHUB_STEP_SUMMARY"
+      - run: echo "Responsible AI reviewer signed off ${GITHUB_REF_NAME} (see the approval packet)" >> "$GITHUB_STEP_SUMMARY"
 
   signoff-business:
-    name: "G5 sign-off: business owner after UAT (signoff-business)"
+    name: "G5 sign-off: Business owner (UAT) (signoff-business)"
     if: startsWith(github.ref, 'refs/tags/my-agent-v') && needs.release-packet.outputs.ready == 'true'
     needs: release-packet
     runs-on: ubuntu-latest
     environment: signoff-business
     steps:
-      - run: echo "Business owner says UAT is done for ${GITHUB_REF_NAME}" >> "$GITHUB_STEP_SUMMARY"
+      - run: echo "Business owner (UAT) says UAT is done for ${GITHUB_REF_NAME}" >> "$GITHUB_STEP_SUMMARY"
 
   uat-evidence:
     name: "G5 UAT evidence (test project ratings)"

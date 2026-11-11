@@ -1,0 +1,60 @@
+# Release pipeline for this agent: what a change goes through between a commit and prod.
+# After editing, run from cicd/:   python -m agent_cicd.generate
+# It rewrites this agent's workflows (.github/workflows/<agent>-*.yml) and the sign-off and residency settings in
+# governance.json and policy.json. CI fails if those files no longer match this one, so edit here, not there.
+# Preview without writing anything:  python -m agent_cicd.generate --plan --agent-dir agents/<agent>
+#
+# Always on: G1 code & security, G2 config & residency before every deploy, G3 evaluation in dev,
+# and the release manager's approval of the `prod` environment (G6). Pass bars and test cases stay in eval/.
+version: 1
+
+environments:
+  # dev and prod always exist. test is a separate Foundry project for the release candidate, red teaming and UAT.
+  # false: releases go dev -> prod, red teaming (if on) runs in dev, and there is no UAT.
+  test: true
+
+gates:
+  # G4: AI red teaming of the release candidate (eval/redteam.json). false: the approval packet shows it as off.
+  redteam: true
+  # G5: who signs off before the release manager. Each role approves its own GitHub environment
+  # (create it with the role's people as required reviewers). Roles appear in this order in governance.json.
+  # uat: true marks the role that confirms UAT is done; the UAT evidence check (eval/uat.json: testers rated
+  # enough answers of the release candidate) runs after it. Needs environments.test. Remove it to skip UAT.
+  signoffs:
+    - id: qa
+      title: QA
+      environment: signoff-qa
+      checks: Evaluation and red-team results reviewed; failures understood
+    - id: business
+      title: Business owner (UAT)
+      environment: signoff-business
+      checks: Users tried the release candidate in the test project and rated answers
+      uat: true
+    - id: rai
+      title: Responsible AI reviewer
+      environment: signoff-rai
+      checks: RAI scorecard, residency findings and privacy results accepted
+  # false only for a solo trial where one person holds every role
+  require_distinct_approvers: true
+  # G6 rejects sign-offs older than this
+  max_signoff_age_days: 14
+
+residency:
+  # G2 rules: canada-strict, eu-data-zone, us-standard or permissive (cicd/policies/presets)
+  preset: permissive
+  # warn: report would-block findings only; enforce: block the deploy. Keep warn until the resources comply.
+  enforcement: warn
+  # Optional: narrow the preset's allowed regions for models and data stores, e.g. [canadacentral]
+  allowed_regions: []
+
+prod:
+  # Restore the previous prod version automatically when the new one fails its smoke checks
+  rollback_on_smoke_failure: true
+  # Daily drift check (cron, UTC); scheduled runs also need the repository variable ENABLE_PROD_DRIFT_CHECK=true.
+  # Empty: on demand only.
+  drift_check: "17 6 * * *"
+
+harvest:
+  # Real conversations -> candidate test cases (cron, UTC), e.g. "0 11 * * 1" for Mondays 11:00.
+  # Empty: run it by hand until the agent has real users.
+  schedule: ""

@@ -22,22 +22,24 @@ on demand   ──► rollback-prod: release manager approves ──► an earli
 | G4 Red team | Foundry AI Red Teaming of the release candidate in the test project | release tags (reused when unchanged) |
 | G5 UAT + sign-offs | testers' ratings of the exact release candidate in Foundry (human evaluation / trace 👍👎), then QA, business-owner and RAI approvals | release tags |
 | G6 Release decision | all sign-offs present and recent, then the release manager approves `prod` | before every prod deploy |
-| Rollback | automatic when prod fails its smoke checks; on demand with `rollback-prod.yml` (release manager approves, restores an earlier released version) | prod deploy failure; on demand |
+| Rollback | automatic when prod fails its smoke checks; on demand with `my-agent-rollback-prod.yml` (release manager approves, restores an earlier released version) | prod deploy failure; on demand |
+
+That is the default shape. Each agent's [`pipeline.yaml`](cicd/agents/my-agent/pipeline.yaml) can drop the test environment, red teaming or UAT, change the sign-off roles, residency preset and regions, and the schedules. `python -m agent_cicd.generate` turns it into the agent's workflows, and G1 fails if they drift apart. See [Shaping the pipeline](cicd/README.md#shaping-the-pipeline-pipelineyaml).
 
 ## Contents
 
 - [cicd/](cicd/): agent-as-code, residency rules, evaluation datasets, pass bars, the gate CLIs and tests. **Start with [cicd/README.md](cicd/README.md)** for setup, roles and the runbook.
-- [cicd/agents/my-agent/](cicd/agents/my-agent/): the prompt-agent template. Values in `<angle brackets>` are placeholders to replace.
+- [cicd/agents/my-agent/](cicd/agents/my-agent/): the prompt-agent template. Values in `<angle brackets>` are placeholders to replace. Its `pipeline.yaml` describes the pipeline the agent goes through.
 - [cicd/agents/my-hosted-agent/](cicd/agents/my-hosted-agent/): the hosted-agent template (your code and `Dockerfile` go in `src/`).
-- [.github/workflows/](.github/workflows/): the release pipeline (`agent-release.yml`), the reusable deploy workflow (`agent-deploy.yml`), manual prod rollback (`rollback-prod.yml`), the prod drift check (`prod-drift-check.yml`), portal-to-PR promotion (`promote-portal-agent.yml`) and the trace harvest that proposes new test cases from real conversations (`harvest-traces.yml`).
+- [.github/workflows/](.github/workflows/): generated from each agent's `pipeline.yaml`: the release pipeline (`my-agent-release.yml`), manual prod rollback (`my-agent-rollback-prod.yml`), the prod drift check (`my-agent-prod-drift-check.yml`), portal-to-PR promotion (`my-agent-promote-portal-agent.yml`) and the trace harvest that proposes new test cases from real conversations (`my-agent-harvest-traces.yml`). The reusable deploy workflow (`agent-deploy.yml`) is shared by every agent and not generated.
 - [docs/release-pipeline.drawio](docs/release-pipeline.drawio): the pipeline design (open it at [app.diagrams.net](https://app.diagrams.net)); [docs/release-pipeline.png](docs/release-pipeline.png) is the exported image shown above.
 
 ## Getting started
 
 1. **Use this repo as a template** (or fork it) for your agent.
-2. **Describe your agent.** For a prompt agent, edit [cicd/agents/my-agent/](cicd/agents/my-agent/): instructions, tools and the per-environment configs. For a hosted (container) agent, start from [cicd/agents/my-hosted-agent/](cicd/agents/my-hosted-agent/) and put your code and `Dockerfile` in its `src/` folder. Point `AGENT_DIR` in [.github/workflows/agent-release.yml](.github/workflows/agent-release.yml) at your folder (and replace `my-agent` there if you like). The pipeline reads `kind` from `agent.json` and picks the matching build and deploy path.
-3. **Write your test cases** in `eval/dataset.jsonl`: keep the generic behavior cases, replace the placeholder document questions with real ones, and raise `min_cases` in `eval/thresholds.json` to 100 or more.
-4. **Pick your residency rules** in `policy.json` (a preset plus overrides) and your sign-off roles in `governance.json`.
+2. **Describe your agent.** For a prompt agent, edit [cicd/agents/my-agent/](cicd/agents/my-agent/): instructions, tools and the per-environment configs. For a hosted (container) agent, start from [cicd/agents/my-hosted-agent/](cicd/agents/my-hosted-agent/), put your code and `Dockerfile` in its `src/` folder and copy `my-agent/pipeline.yaml` into it. Rename the folder to your agent's name if you like: it names the workflows and release tags. The pipeline reads `kind` from `agent.json` and picks the matching build and deploy path.
+3. **Shape the pipeline** in the agent's `pipeline.yaml`: test environment or not, red teaming, sign-off roles and UAT, residency preset and regions, schedules. Then run `cd cicd && python -m agent_cicd.generate` and commit the generated workflows.
+4. **Write your test cases** in `eval/dataset.jsonl`: keep the generic behavior cases, replace the placeholder document questions with real ones, and raise `min_cases` in `eval/thresholds.json` to 100 or more.
 5. **Set up Azure and GitHub** (projects, identities, environments): see [One-time setup](cicd/README.md#one-time-setup).
 6. **Release:** merge to `main` for dev and evaluation, then push a tag such as `my-agent-v1.0.0` to run the full release.
 

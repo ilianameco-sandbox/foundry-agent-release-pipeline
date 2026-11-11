@@ -1,16 +1,16 @@
-# Manual prod rollback for one agent (cicd/agents/my-agent), with the release manager's approval.
+# Manual prod rollback for one agent (cicd/agents/{= agent =}), with the release manager's approval.
 # Automatic rollback already happens inside a release when prod fails its smoke checks (agent-deploy.yml).
 # Use this one when a problem shows up later.
 #
-# How: Actions -> my-agent-rollback-prod -> Run workflow
-#   * "Use workflow from": Tags -> the release tag you want prod to go back to (for example my-agent-v1.2.0).
+# How: Actions -> {= agent =}-rollback-prod -> Run workflow
+#   * "Use workflow from": Tags -> the release tag you want prod to go back to (for example {= tag_prefix =}1.2.0).
 #     The prod environment only accepts release tags, and the tag's agent files are used to check the version.
 #   * version: the prod agent version that release deployed (see its approval issue or the Foundry portal).
 #   * reason: why (an incident number is enough). It is recorded on the new version and on the release issue.
 # The job waits for the release manager to approve `prod`, recreates that version as the newest one
 # (hosted agents: the same image digest), runs the smoke checks and posts the result to the release issue.
-# Copy this file with agent-release.yml when you add an agent and replace "my-agent" in the copy.
-name: my-agent-rollback-prod
+# Generated from cicd/agents/{= agent =}/pipeline.yaml by `python -m agent_cicd.generate`: edit that file, not this one.
+name: {= agent =}-rollback-prod
 
 on:
   workflow_dispatch:
@@ -30,7 +30,7 @@ permissions:
   issues: write
 
 env:
-  AGENT_DIR: agents/my-agent
+  AGENT_DIR: agents/{= agent =}
 
 jobs:
   check:
@@ -42,7 +42,7 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: |
           case "${GITHUB_REF}" in
-            refs/tags/my-agent-v*) ;;
+            refs/tags/{= tag_prefix =}[0-9]*) ;;
             *) echo "::error::Run this workflow from the release tag you are going back to (Use workflow from -> Tags), not ${GITHUB_REF}"; exit 1 ;;
           esac
           [[ "$VERSION" =~ ^[0-9]+$ ]] || { echo "::error::version must be a number, got '$VERSION'"; exit 1; }
@@ -55,7 +55,7 @@ jobs:
     timeout-minutes: 45
     # Never at the same time as a release deploying prod.
     concurrency:
-      group: my-agent-prod-deploy
+      group: {= agent =}-prod-deploy
       cancel-in-progress: false
     env:
       FOUNDRY_PROJECT_ENDPOINT: ${{ secrets.FOUNDRY_PROJECT_ENDPOINT }}

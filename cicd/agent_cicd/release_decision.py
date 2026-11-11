@@ -59,8 +59,9 @@ def decide_release(governance: dict[str, Any], approvals: list[dict[str, Any]], 
         decisions = [a for a in approvals if env in [e.get("name") for e in a.get("environments") or []]]
         rejected = [a for a in decisions if a.get("state") == "rejected"]
         approved = [a for a in decisions if a.get("state") == "approved"]
+        # Sign-off jobs are named "... (<environment>)"; match the whole name so "signoff" can't match "signoff-rai".
         job_times = [_time(j.get("completed_at")) for j in jobs
-                     if j.get("conclusion") == "success" and env in str(j.get("name", ""))]
+                     if j.get("conclusion") == "success" and f"({env})" in str(j.get("name", ""))]
         when = max([t for t in job_times if t], default=None)
         approver = (approved[-1].get("user") or {}).get("login", "") if approved else ""
         age = (now - when).total_seconds() / 86400 if when else None

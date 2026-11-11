@@ -1,0 +1,423 @@
+{# Release pipeline template. Delimiters: {= value =} and {% block %}, so GitHub's ${{ }} needs no escaping. #}
+# Agent release pipeline for one agent (cicd/agents/{= agent =}): {= flow =}.
+# Generated from cicd/agents/{= agent =}/pipeline.yaml by `python -m agent_cicd.generate`: edit that file, not this one.
+# Prompt and hosted agents use the same file: agent.json "kind" decides. A hosted agent's image is built and
+# scanned in G1, pushed once by the dev deploy, and the same digest is promoted to {= promoted_to =}.
+#   G1  ci                every PR and push: secret scan, dependency scan, unit tests, render every env, validate rules;
+#                         hosted agents: image build + vulnerability scan (PRs here; releases in the dev deploy, + SBOM)
+#   G2  (inside deploys)  config & residency check against policy.json before every deploy ({= env_list =})
+#   G3  quality-gate      push to main + release tags: Foundry evaluation of the dev version, incl. privacy (PII),
+#                         protected material and groundedness; reused when agent, cases and judges are unchanged
+{% if test %}
+#   --  deploy-test       release tags{% if redteam %} (or manual force_redteam){% endif %}: the release candidate goes to the test/UAT project
+{% endif %}
+{% if redteam %}
+#   G4  redteam-gate      AI red teaming of the {= redteam_env =} version (identity persona tests are not built yet)
+{% endif %}
+#   --  release-packet    one approval packet: every gate, residency findings, Responsible AI scorecard
+#   G5  signoff-*         release tags: each role approves its own GitHub environment ({= signoff_titles =});
+{% if uat %}
+#       uat-evidence      after the {= uat.title =} sign-off: checks testers rated enough answers of the test version
+{% endif %}
+#   G6  release-decision  checks every sign-off is present and recent, then the release manager approves `prod`
+name: {= agent =}-release
+
+on:
+  pull_request:
+    paths: ["cicd/**", "!cicd/**/*.md", ".github/workflows/{= agent =}-release.yml", ".github/workflows/agent-deploy.yml",
+            ".github/scripts/**"]
+  push:
+    branches: [main]
+    # Docs-only changes don't deploy or evaluate; tag pushes ignore path filters.
+    paths: ["cicd/**", "!cicd/**/*.md", ".github/workflows/{= agent =}-release.yml", ".github/workflows/agent-deploy.yml",
+            ".github/scripts/**"]
+    tags: ["{= tag_prefix =}[0-9]*"]
+  workflow_dispatch:
+    inputs:
+{% if redteam %}
+      force_redteam:
+        description: {= force_redteam_help =}
+        type: boolean
+        default: false
+{% endif %}
+      force_eval:
+        description: Run a new evaluation even if a passing one exists for the same agent, cases and judges
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AGENT_DIR: agents/{= agent =}
+  GITLEAKS_VERSION: "8.30.1"
+  TRIVY_VERSION: "0.76.2"
+
+jobs:
+  ci:
+    name: "G1: code & security"
+    runs-on: ubuntu-latest
+    outputs:
+      kind: ${{ steps.kind.outputs.kind }}
+    defaults:
+      run:
+        working-directory: cicd
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: cicd/requirements.txt
+      - name: Secret scan (gitleaks, whole git history)
+        working-directory: .
+        run: |
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz gitleaks
+          ./gitleaks git --redact --no-banner --exit-code 1 .
+      - run: pip install -r requirements.txt pytest==8.4.2 pip-audit==2.10.1
+      - name: Workflows and settings match every agent's pipeline.yaml (edit pipeline.yaml, then run the generator)
+        run: python -m agent_cicd.generate --check
+      - name: Agent kind (agent.json); hosted agents need a Dockerfile in their source folder
+        id: kind
+        run: python -m agent_cicd.image --agent-dir "$AGENT_DIR" --require-source
+      - name: Dependency scan (pip-audit, known vulnerabilities in pinned packages)
+        run: pip-audit -r requirements.txt --progress-spinner off
+      - name: Unit tests (gate logic, rules, definition rendering, approval packet)
+        run: python -m pytest tests -q
+      - name: "Hosted agent: build the image and scan it (pull request; nothing is pushed)"
+        if: steps.kind.outputs.kind == 'hosted' && github.event_name == 'pull_request'
+        run: bash ../.github/scripts/build-scan-image.sh "$AGENT_DIR" "pr-${{ github.event.pull_request.number }}" out/sbom.cdx.json
+      - name: Render every environment without deploying (endpoints come from GitHub Environment secrets, unset here)
+        run: |
+          for env in {= env_words =}; do python -m agent_cicd.deploy --agent-dir "$AGENT_DIR" --env "$env" --dry-run > /dev/null; done
+      - name: Validate test cases, red-team policy, customer rules, UAT rules and sign-off roles
+        run: |
+          python -m agent_cicd.quality_gate --agent-dir "$AGENT_DIR" --env dev --validate-only
+{% if redteam %}
+          python -m agent_cicd.redteam_gate --agent-dir "$AGENT_DIR" --env dev --validate-only
+{% endif %}
+          python -m agent_cicd.smoke --agent-dir "$AGENT_DIR" --env dev --validate-only
+          python -m agent_cicd.policy_gate --agent-dir "$AGENT_DIR" --validate-only
+{% if uat %}
+          python -m agent_cicd.uat_evidence --agent-dir "$AGENT_DIR" --validate-only
+{% endif %}
+          python -m agent_cicd.release_decision --agent-dir "$AGENT_DIR" --validate-only
+
+  deploy-dev:
+    name: "Deploy to dev (G2 + smoke; hosted: build, scan, push)"
+    if: github.event_name != 'pull_request'
+    needs: ci
+    concurrency:
+      group: {= agent =}-dev-deploy
+      cancel-in-progress: false
+    uses: ./.github/workflows/agent-deploy.yml
+    secrets: inherit
+    with:
+      environment: dev
+      agent_dir: agents/{= agent =}
+      build_image: true
+
+  quality-gate:
+    name: "G3: automated evaluation"
+    needs: deploy-dev
+    runs-on: ubuntu-latest
+    environment: dev
+    timeout-minutes: 90
+    # Two evaluations at once share the judge deployment's token limit and get HTTP 429s.
+    concurrency:
+      group: {= agent =}-dev-evals
+      cancel-in-progress: false
+    env:
+      FOUNDRY_PROJECT_ENDPOINT: ${{ secrets.FOUNDRY_PROJECT_ENDPOINT }}
+      AZURE_CONTAINER_REGISTRY: ${{ vars.AZURE_CONTAINER_REGISTRY }}
+    defaults:
+      run:
+        working-directory: cicd
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: cicd/requirements.txt
+      - run: pip install -r requirements.txt
+      - uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2.3.1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Foundry evaluation of the recorded version (fail closed)
+        run: >-
+          python -m agent_cicd.quality_gate --agent-dir "$AGENT_DIR" --env dev
+          --version "${{ needs.deploy-dev.outputs.agent_version }}"
+          --fingerprint "${{ needs.deploy-dev.outputs.fingerprint }}"
+          ${{ github.event.inputs.force_eval == 'true' && '--force' || '' }}
+          --report out/quality.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: quality-gate-report
+          path: cicd/out/quality.json
+          if-no-files-found: ignore
+{% if test %}
+
+  deploy-test:
+    name: "Deploy release candidate to test/UAT (G2 + smoke)"
+    if: {= candidate_if =}
+    needs: [deploy-dev, quality-gate]
+    concurrency:
+      group: {= agent =}-test-deploy
+      cancel-in-progress: false
+    uses: ./.github/workflows/agent-deploy.yml
+    secrets: inherit
+    with:
+      environment: test
+      agent_dir: agents/{= agent =}
+      # Hosted agents: the exact image dev was evaluated on (unused for prompt agents)
+      image: ${{ needs.deploy-dev.outputs.image }}
+{% endif %}
+{% if redteam %}
+
+  redteam-gate:
+    name: "G4: AI red teaming ({= redteam_env =})"
+{% if test %}
+    needs: deploy-test
+{% else %}
+    # No test environment: the release candidate is red-teamed in dev, after its evaluation passed.
+    if: {= candidate_if =}
+    needs: [deploy-dev, quality-gate]
+{% endif %}
+    runs-on: ubuntu-latest
+    environment: {= redteam_env =}
+    timeout-minutes: 300
+    concurrency:
+      group: {= agent =}-{= redteam_env =}-evals
+      cancel-in-progress: false
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
+    env:
+      FOUNDRY_PROJECT_ENDPOINT: ${{ secrets.FOUNDRY_PROJECT_ENDPOINT }}
+      AZURE_CONTAINER_REGISTRY: ${{ vars.AZURE_CONTAINER_REGISTRY }}
+    defaults:
+      run:
+        working-directory: cicd
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: cicd/requirements.txt
+      - run: pip install -r requirements.txt
+      - uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2.3.1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Fetch earlier red-team reports (Foundry can't list red-team evaluations)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p in/previous
+          n=0
+          for id in $(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=redteam-gate-report&per_page=20" \
+                        --jq '.artifacts[] | select(.expired == false) | .id' | head -n 5); do
+            n=$((n + 1))
+            dir="in/previous/$(printf '%02d' "$n")-${id}"
+            mkdir -p "$dir"
+            gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${id}/zip" > "$dir/report.zip" \
+              && unzip -q -o "$dir/report.zip" -d "$dir" || echo "could not read artifact ${id}"
+          done
+          echo "earlier reports: $(find in/previous -name redteam.json | wc -l)"
+      - name: Red-team the {= redteam_env =} version, or reuse a passing scan of the same fingerprint in this project
+        run: >-
+          python -m agent_cicd.redteam_gate --agent-dir "$AGENT_DIR" --env {= redteam_env =}
+          --version "${{ needs.{= candidate_job =}.outputs.agent_version }}"
+          --fingerprint "${{ needs.{= candidate_job =}.outputs.fingerprint }}"
+          ${{ github.event.inputs.force_redteam == 'true' && '--force' || '' }}
+          --previous-dir in/previous
+          --report out/redteam.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: redteam-gate-report
+          path: cicd/out/redteam.json
+          if-no-files-found: ignore
+{% endif %}
+
+  release-packet:
+    name: "Approval packet"
+    # Runs even when a gate failed, so reviewers and the team always see why a release is blocked.
+    if: >-
+      always() && needs.deploy-dev.result == 'success' &&
+      ({= candidate_if =})
+    needs: [{= packet_needs =}]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    outputs:
+      ready: ${{ steps.packet.outputs.ready }}
+    defaults:
+      run:
+        working-directory: cicd
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        continue-on-error: true
+        with:
+          pattern: "{= packet_artifacts =}"
+          path: cicd/in
+          merge-multiple: true
+      - name: Build the approval packet
+        id: packet
+        env:
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+        run: >-
+          python -m agent_cicd.release_report --agent-dir "$AGENT_DIR"
+          --quality in/quality.json {= redteam_report_arg =}
+          {= policy_report_args =}
+          --agent-name "${{ needs.deploy-dev.outputs.agent_name }}"
+          --version "${{ needs.deploy-dev.outputs.agent_version }}"
+{% if test %}
+          --test-version "${{ needs.deploy-test.outputs.agent_version }}"
+{% endif %}
+          --fingerprint "${{ needs.deploy-dev.outputs.fingerprint }}"
+          --model-version "${{ needs.deploy-dev.outputs.model_version }}"
+          --markdown out/release-packet.md --html out/release-packet.html
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-packet
+          path: |
+            cicd/out/release-packet.html
+            cicd/out/release-packet.md
+      - name: Post the packet to the release-approval issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash ../.github/scripts/release-issue.sh out/release-packet.md
+
+  # G5: each role approves its own GitHub environment (required reviewer). The jobs only record the decision.
+{% for role in signoff_jobs %}
+  signoff-{= role.id =}:
+    name: "G5 sign-off: {= role.title =} ({= role.environment =})"
+    if: startsWith(github.ref, 'refs/tags/{= tag_prefix =}') && needs.release-packet.outputs.ready == 'true'
+    needs: release-packet
+    runs-on: ubuntu-latest
+    environment: {= role.environment =}
+    steps:
+{% if role.get("uat") %}
+      - run: echo "{= role.title =} says UAT is done for ${GITHUB_REF_NAME}" >> "$GITHUB_STEP_SUMMARY"
+{% else %}
+      - run: echo "{= role.title =} signed off ${GITHUB_REF_NAME} (see the approval packet)" >> "$GITHUB_STEP_SUMMARY"
+{% endif %}
+{% if not loop.last %}
+
+{% endif %}
+{% endfor %}
+{% if uat %}
+
+  uat-evidence:
+    name: "G5 UAT evidence (test project ratings)"
+    needs: [deploy-test, signoff-{= uat.id =}]
+    runs-on: ubuntu-latest
+    environment: test
+    permissions:
+      id-token: write
+      contents: read
+      issues: write
+    env:
+      FOUNDRY_PROJECT_ENDPOINT: ${{ secrets.FOUNDRY_PROJECT_ENDPOINT }}
+      AZURE_CONTAINER_REGISTRY: ${{ vars.AZURE_CONTAINER_REGISTRY }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+    defaults:
+      run:
+        working-directory: cicd
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: cicd/requirements.txt
+      - run: pip install -r requirements.txt
+      - uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2.3.1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Count ratings of the release candidate (not enough yet? rate more answers, then re-run this job)
+        id: uat
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          python -m agent_cicd.uat_evidence --agent-dir "$AGENT_DIR" --env test \
+            --version "${{ needs.deploy-test.outputs.agent_version }}" --report out/uat.json
+          code=$?
+          set -e
+          cp "$GITHUB_STEP_SUMMARY" out/uat.md
+          bash ../.github/scripts/release-issue.sh out/uat.md || echo "could not post to the release issue"
+          exit $code
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: uat-evidence-${{ github.run_attempt }}
+          path: cicd/out/uat.json
+          if-no-files-found: ignore
+{% endif %}
+
+  release-decision:
+    name: "G6: release decision checks"
+    needs: [{= decision_needs =}]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_AUTHOR: ${{ github.actor }}
+    defaults:
+      run:
+        working-directory: cicd
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - name: Every sign-off present, recent and (if required) by different people
+        run: |
+          set +e
+          python -m agent_cicd.release_decision --agent-dir "$AGENT_DIR" --report out/decision.json
+          code=$?
+          set -e
+          cp "$GITHUB_STEP_SUMMARY" out/decision.md
+          bash ../.github/scripts/release-issue.sh out/decision.md || echo "could not post to the release issue"
+          exit $code
+
+  deploy-prod:
+    name: "G6: release manager approves, deploy to prod (G2 + smoke)"
+    if: startsWith(github.ref, 'refs/tags/{= tag_prefix =}')
+    needs: [release-decision, {= candidate_job =}]
+    concurrency:
+      group: {= agent =}-prod-deploy
+      cancel-in-progress: false
+    uses: ./.github/workflows/agent-deploy.yml
+    secrets: inherit
+    with:
+      environment: prod
+      agent_dir: agents/{= agent =}
+{% if rollback_on_smoke_failure %}
+      rollback_on_smoke_failure: true
+{% endif %}
+      # Hosted agents: the exact image that passed {= prod_image_note =}
+      image: ${{ needs.{= candidate_job =}.outputs.image }}

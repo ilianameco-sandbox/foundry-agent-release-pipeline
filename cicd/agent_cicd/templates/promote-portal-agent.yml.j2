@@ -1,7 +1,8 @@
 # Promote an agent version built in the Foundry portal (dev project) into the repo, as a pull request.
-# Actions -> promote-portal-agent -> Run workflow -> enter the version number (or "latest").
+# Actions -> {= agent =}-promote-portal-agent -> Run workflow -> enter the version number (or "latest").
+# Generated from cicd/agents/{= agent =}/pipeline.yaml by `python -m agent_cicd.generate`: edit that file, not this one.
 # Nothing is deployed here: merging the PR runs the dev gates, and prod still needs a release tag + approval.
-name: promote-portal-agent
+name: {= agent =}-promote-portal-agent
 
 on:
   workflow_dispatch:
@@ -21,11 +22,11 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: promote-portal-agent
+  group: {= agent =}-promote-portal-agent
   cancel-in-progress: false
 
 env:
-  AGENT_DIR: agents/my-agent
+  AGENT_DIR: agents/{= agent =}
 
 jobs:
   promote:

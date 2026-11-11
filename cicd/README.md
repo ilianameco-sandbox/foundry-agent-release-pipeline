@@ -14,10 +14,12 @@ Every release has to pass security scans, the agent's residency rules, a two-sui
 | Packet | `release-packet` | release tags | always runs and builds the approval packet with every gate, residency findings and the Responsible AI scorecard |
 | G5 | `signoff-qa`, `signoff-rai`, `signoff-business` + `uat-evidence` | release tags | each role approves its GitHub environment; after the business sign-off, testers' ratings of the test version meet `eval/uat.json` |
 | G6 | `release-decision` → `deploy-prod` | release tags | all sign-offs present and under 14 days old; the release manager approves `prod`; prod passes G2 and the smoke checks, or rolls back |
-| Drift | `prod-drift-check.yml` | daily (opt-in) | prod still runs the last released definition and model; otherwise an issue is opened |
-| Rollback | inside `deploy-prod`; `rollback-prod.yml` | prod smoke failure; on demand | the previous (or a chosen earlier) released version is restored and passes the smoke checks. See [Rollback](#rollback) |
+| Drift | `my-agent-prod-drift-check.yml` | daily (opt-in) | prod still runs the last released definition and model; otherwise an issue is opened |
+| Rollback | inside `deploy-prod`; `my-agent-rollback-prod.yml` | prod smoke failure; on demand | the previous (or a chosen earlier) released version is restored and passes the smoke checks. See [Rollback](#rollback) |
 
 Every gate **fails closed**: an API error, a missing result, an incomplete run or too few cases blocks promotion. Outcomes are `PASS`, `REVIEW` (passes, flagged for the approver), `INCONCLUSIVE` and `FAIL`; only the first two continue.
+
+This is the default pipeline. Each agent's `pipeline.yaml` can drop the test environment, red teaming or UAT, change the sign-off roles, residency rules and schedules; the workflows are generated from it. See [Shaping the pipeline](#shaping-the-pipeline-pipelineyaml).
 
 ## Roles
 
@@ -30,7 +32,34 @@ Every gate **fails closed**: an API error, a missing result, an incomplete run o
 | Responsible AI reviewer | Accepts the RAI scorecard, privacy results and residency findings | approves `signoff-rai` |
 | Release manager | Final go / no-go | approves `prod` |
 
-Roles and the sign-off rules are in `agents/my-agent/governance.json`. With `require_distinct_approvers` set to `true` (the default), nobody can sign off a release they pushed or sign two roles. Set it to `false` only for a solo trial where one person holds every role.
+Roles and the sign-off rules are set in `agents/my-agent/pipeline.yaml`, which writes them to `governance.json`. With `require_distinct_approvers` set to `true` (the default), nobody can sign off a release they pushed or sign two roles. Set it to `false` only for a solo trial where one person holds every role.
+
+## Shaping the pipeline (pipeline.yaml)
+
+Each agent folder has a `pipeline.yaml` that says which steps its releases go through. Edit it, then generate:
+
+```bash
+cd cicd
+python -m agent_cicd.generate --plan --agent-dir agents/my-agent   # preview the stages and gates
+python -m agent_cicd.generate                                      # write the workflows and settings
+```
+
+| Setting | Default | What changes |
+|---|---|---|
+| `environments.test` | `true` | `false`: releases go dev → prod; red teaming runs in dev; no UAT |
+| `gates.redteam` | `true` | `false`: no G4 job; the approval packet shows red teaming as OFF instead of blocking |
+| `gates.signoffs` | QA, business owner (UAT), RAI reviewer | the G5 roles: `id`, `title`, `environment` (its GitHub environment), optional `checks`. `uat: true` on one role runs the UAT evidence check after it (needs `environments.test`); remove it to skip UAT |
+| `gates.require_distinct_approvers`, `gates.max_signoff_age_days` | `true`, `14` | G6 rules |
+| `residency.preset`, `residency.enforcement` | `permissive`, `warn` | the G2 preset and whether it blocks |
+| `residency.allowed_regions` | `[]` | narrows the preset's model and data-store regions, for example `[canadacentral]` (can't widen it) |
+| `prod.rollback_on_smoke_failure` | `true` | automatic rollback when the new prod version fails its smoke checks |
+| `prod.drift_check`, `harvest.schedule` | daily 06:17 UTC, off | cron schedules (UTC); empty means on demand only |
+
+Always on: G1, G2 before every deploy, G3 in dev and the release manager's `prod` approval. Pass bars and test cases stay in `eval/`.
+
+The generator writes the agent's workflows (`.github/workflows/<agent>-release.yml`, `-rollback-prod.yml`, `-prod-drift-check.yml`, `-harvest-traces.yml` and, for prompt agents, `-promote-portal-agent.yml`). It also writes the sign-off keys of `governance.json` and the `preset`, `enforcement` and allowed regions of `policy.json`; the rest of those files stays yours. G1 runs `python -m agent_cicd.generate --check` and fails if a generated file no longer matches `pipeline.yaml`, so change `pipeline.yaml`, not the generated files. After changing sign-off roles, create their GitHub environments (see [One-time setup](#one-time-setup)).
+
+`pipeline.yaml` is the format a visual pipeline builder would read and write; the generator stays the only thing that turns it into workflows.
 
 ## Adapting the template to your agent
 
@@ -47,8 +76,9 @@ Everything specific to an agent lives in its folder. Values in `<angle brackets>
 | `eval/smoke.json` | Post-deploy smoke checks |
 | `eval/uat.json` | UAT evidence rules |
 | `eval/harvest.json` | Settings for harvesting test cases from real conversations |
-| `policy.json` | Residency and security rules: a preset plus overrides |
-| `governance.json` | Sign-off roles and their GitHub environments |
+| `pipeline.yaml` | Which steps releases go through: test environment, red teaming, sign-off roles and UAT, residency preset and regions, schedules. See [Shaping the pipeline](#shaping-the-pipeline-pipelineyaml) |
+| `policy.json` | Residency and security rules: a preset plus overrides (preset, enforcement and allowed regions come from `pipeline.yaml`) |
+| `governance.json` | Sign-off roles and their GitHub environments (written from `pipeline.yaml`) |
 
 **Adding a tool.** For example, an Azure AI Search index:
 
@@ -69,11 +99,11 @@ Then add `"SEARCH_INDEX_ASSET": "<index-name>/versions/1"` to `variables` in eac
 
 The template ships 13 generic must-pass behavior cases (scope, authority, prompt injection, safety, privacy) that suit most enterprise agents, and 4 placeholder document questions to replace. A judge sees only `reference_facts`, so they must state everything the source says that an answer may repeat. Use category `none` for in-scope questions no source covers; groundedness skips them. Raise `min_cases` to 100 or more before the first production release.
 
-**More than one agent.** Copy the agent folder, copy `.github/workflows/agent-release.yml` and `rollback-prod.yml`, and replace `my-agent` in the copies (agent folder, tag prefix and concurrency groups). Each agent gets its own release tags, such as `billing-agent-v1.0.0`.
+**More than one agent.** Copy the agent folder (with its `pipeline.yaml`) to a new name such as `agents/billing-agent`, and run `python -m agent_cicd.generate`. The new agent gets its own workflows, release tags (`billing-agent-v1.0.0`) and concurrency groups. The folder name is the agent's pipeline name: lowercase letters, digits and dashes. One agent's name can't start with another's name plus `-v` (such as `billing` and `billing-voice`), because their release tags would overlap; the generator refuses that.
 
 ## Hosted agents
 
-A hosted agent is your own code (Microsoft Agent Framework, LangGraph, or any framework) running in a container that Foundry hosts. The pipeline tells the two kinds apart by `"kind"` in `agent.json`, so the same `agent-release.yml` releases either: point `AGENT_DIR` at the agent's folder. Start from [agents/my-hosted-agent/](agents/my-hosted-agent/) and put the code and its `Dockerfile` in `src/` (its [README](agents/my-hosted-agent/src/README.md) lists what the image must do).
+A hosted agent is your own code (Microsoft Agent Framework, LangGraph, or any framework) running in a container that Foundry hosts. The pipeline tells the two kinds apart by `"kind"` in `agent.json`, so the same generated release workflow releases either. Start from [agents/my-hosted-agent/](agents/my-hosted-agent/), put the code and its `Dockerfile` in `src/` (its [README](agents/my-hosted-agent/src/README.md) lists what the image must do), copy `agents/my-agent/pipeline.yaml` into the folder and run the generator. Hosted agents get no portal-promotion workflow: their code lives in the repo.
 
 **Build once, promote by digest.** Every environment runs the exact image that was tested:
 
@@ -236,7 +266,7 @@ The approval is the GitHub environment, not the 👍: a rating can't block anyth
 
 ## Drift check
 
-`prod-drift-check.yml` runs daily (once you set the repository variable `ENABLE_PROD_DRIFT_CHECK` to `true`) and on demand, with the prod identity in the `prod-monitor` environment, which has no reviewer and is limited to `main`. It compares the latest prod version with the agent files of the last successful prod deployment and opens a "Prod drift" issue if:
+`my-agent-prod-drift-check.yml` runs on the `prod.drift_check` schedule in `pipeline.yaml` (daily by default, once you set the repository variable `ENABLE_PROD_DRIFT_CHECK` to `true`) and on demand, with the prod identity in the `prod-monitor` environment, which has no reviewer and is limited to `main`. It compares the latest prod version with the agent files of the last successful prod deployment and opens a "Prod drift" issue if:
 - the version wasn't created by the pipeline;
 - its definition differs from the release;
 - the model deployment was upgraded since the release;
@@ -247,7 +277,7 @@ It closes the issue when prod matches again.
 ## Rollback
 
 - **Automatic, during a release:** when the new prod version fails its smoke checks, or a hosted version never becomes active, the prod deploy recreates the previous version as the newest one. The release run fails, so the drift check keeps the previous release as its reference.
-- **Manual, later (`rollback-prod.yml`):** when a problem shows up after a release.
+- **Manual, later (`my-agent-rollback-prod.yml`):** when a problem shows up after a release.
   1. Open *Actions → my-agent-rollback-prod → Run workflow*.
   2. Under *Use workflow from*, pick the **tag of the release you are going back to**. The `prod` environment only accepts release tags, and the job checks the version against that tag's agent files.
   3. Enter the prod **version** that release deployed (shown in its approval issue and in the Foundry portal), and a **reason**.
@@ -255,7 +285,7 @@ It closes the issue when prod matches again.
 
   It refuses a version the pipeline didn't create, or one that doesn't match the tag's files. Hosted agents get back the exact image digest, so keep released images in the registry: don't let a retention policy delete them.
 
-A rollback creates a new version; nothing is deleted, so you can roll forward again by releasing a fixed version. Tags created before this workflow existed don't contain it. For those, run `python -m agent_cicd.deploy --agent-dir agents/my-agent --env prod --rollback-to <version> --require-released --reason "<why>"` from that tag's checkout, with the prod identity.
+A rollback creates a new version; nothing is deleted, so you can roll forward again by releasing a fixed version. Tags created before this workflow existed (or before the workflows were renamed `my-agent-*`) don't contain it. For those, run `python -m agent_cicd.deploy --agent-dir agents/my-agent --env prod --rollback-to <version> --require-released --reason "<why>"` from that tag's checkout, with the prod identity.
 
 ## Layout
 
@@ -267,6 +297,7 @@ cicd/
     config/dev.json       agent name, model and judge deployments, variables, azure_resource_group; endpoint from ${FOUNDRY_PROJECT_ENDPOINT}
     config/test.json      same shape for the test/UAT project
     config/prod.json      same shape for the prod project
+    pipeline.yaml         which steps releases go through (test env, red team, sign-offs, UAT, residency, schedules)
     policy.json           residency and security rules: preset + overrides + enforcement (G2)
     governance.json       sign-off roles, their GitHub environments, distinct-approver and expiry rules (G5/G6)
     eval/dataset.jsonl    test cases: suite "behavior" + suite "documents"
@@ -281,14 +312,15 @@ cicd/
   agent_cicd/             deploy, smoke, quality_gate, redteam_gate, policy_gate, uat_evidence, release_decision,
                           release_report, drift, promote, harvest, image (hosted build info, promotion by digest)
                           + pure gate logic (gates.py)
+                          + generate (pipeline.yaml → workflows and settings) with its templates/
   tests/                  offline unit tests (fixtures in tests/fixtures)
-.github/workflows/
-  agent-release.yml       the pipeline for one agent (prompt or hosted)
-  agent-deploy.yml        reusable deploy (G2 → hosted: build, scan, push → create version → record → smoke → optional rollback)
-  prod-drift-check.yml    daily: prod vs the last release
-  rollback-prod.yml       manual: restore an earlier released prod version (release manager approves)
-  promote-portal-agent.yml  manual: agent version built in the Foundry portal → pull request
-  harvest-traces.yml      manual: real conversations → candidate test cases → pull request
+.github/workflows/        generated per agent from its pipeline.yaml, except agent-deploy.yml:
+  my-agent-release.yml    the pipeline for one agent (prompt or hosted)
+  agent-deploy.yml        reusable deploy, shared by every agent (G2 → hosted: build, scan, push → create version → record → smoke → optional rollback)
+  my-agent-prod-drift-check.yml      scheduled: prod vs the last release
+  my-agent-rollback-prod.yml         manual: restore an earlier released prod version (release manager approves)
+  my-agent-promote-portal-agent.yml  manual: agent version built in the Foundry portal → pull request (prompt agents)
+  my-agent-harvest-traces.yml        manual or scheduled: real conversations → candidate test cases → pull request
 .github/scripts/release-issue.sh     posts a report to the release's approval issue
 .github/scripts/build-scan-image.sh  hosted agents: build the image, Trivy scan, SBOM
 ```
@@ -308,7 +340,7 @@ cicd/
    - **all:** *Reader* on each connected data store, such as AI Search (G2 reads its region).
 4. **GitHub Environments.**
    - `dev`, `test`, `prod`, `prod-monitor`: **secrets** `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` and `FOUNDRY_PROJECT_ENDPOINT`. `prod-monitor` uses the prod identity and prod endpoint, has no reviewer, and is limited to branch `main`.
-   - `signoff-qa`, `signoff-business`, `signoff-rai`: no secrets, one required reviewer each (QA, business owner, RAI reviewer).
+   - one per sign-off role in `pipeline.yaml` (by default `signoff-qa`, `signoff-business`, `signoff-rai`): no secrets, one required reviewer each (QA, business owner, RAI reviewer).
    - `prod`: required reviewer (release manager), *Allow administrators to bypass* off, deployment tags `my-agent-v*` only.
    - Turn on *Prevent self-review* on the sign-off environments.
    - **Repository:** a tag ruleset protecting `my-agent-v*`, and approval required for workflows from fork PRs.
@@ -325,7 +357,8 @@ cicd/
 
 | You do | Pipeline does |
 |---|---|
-| *Actions → promote-portal-agent → Run workflow* with a dev agent version | Exports that portal version into `agent.json` + `instructions.md` and opens a PR (nothing deployed) |
+| *Actions → my-agent-promote-portal-agent → Run workflow* with a dev agent version | Exports that portal version into `agent.json` + `instructions.md` and opens a PR (nothing deployed) |
+| Edit `pipeline.yaml`, run `python -m agent_cicd.generate`, open a PR | G1 checks the generated files match; after merge, releases follow the new shape |
 | Open a PR touching `cicd/` | G1 only |
 | Merge to `main` | G1 → G2 + deploy a new dev version → G3. Stops there |
 | `git tag my-agent-v1.0.0` then `git push origin my-agent-v1.0.0` | G1 → dev → G3 → G2 + test deploy → G4 → packet → sign-offs and UAT (G5) → release decision → release manager approves prod → G2 + prod deploy → smoke (or rollback) |
@@ -340,7 +373,7 @@ A release reaches the sign-off reviewers in about an hour when a new red-team sc
 The pipeline deploys from the repo files, never from the portal. If you build or tweak the agent in the **dev** project's portal, promote it into the files:
 
 1. Test the agent in the portal and note its version number (or use `latest`).
-2. Go to **GitHub → Actions → promote-portal-agent → Run workflow** and enter the version.
+2. Go to **GitHub → Actions → my-agent-promote-portal-agent → Run workflow** and enter the version.
 3. The workflow reads that version from the dev project and writes the instructions, reasoning and tools into `instructions.md` and `agent.json`. Environment-specific values such as an index asset go back to `${VARIABLES}`.
 4. It checks that the files render to exactly that portal definition and that G1's tests pass, then opens a pull request with the diff.
 5. Review and merge. The normal pipeline takes over: dev deploy, smoke checks and evaluation; then a release tag, red teaming, approval and prod.
@@ -363,6 +396,8 @@ Locally: `python -m agent_cicd.promote --agent-dir agents/my-agent --version 12 
 cd cicd
 python -m pip install -r requirements.txt pytest==8.4.2
 python -m pytest tests -q
+python -m agent_cicd.generate --check     # generated workflows and settings match every pipeline.yaml
+python -m agent_cicd.generate --plan --agent-dir agents/my-agent
 python -m agent_cicd.deploy --agent-dir agents/my-agent --env dev --dry-run
 python -m agent_cicd.quality_gate --agent-dir agents/my-agent --env dev --validate-only
 # Hosted agent: kind and build info, then render with an image digest (no Azure calls):

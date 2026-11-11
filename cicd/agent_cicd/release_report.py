@@ -6,7 +6,7 @@ Reads the Gate 1b (quality) and Gate 2 (red-team) reports, then writes:
   * an optional Microsoft Teams message when TEAMS_WEBHOOK_URL is set.
 
 A missing or unreadable report is shown as NOT RUN and blocks the release, so the packet never looks
-greener than the evidence.
+greener than the evidence. `--no-redteam` (pipeline.yaml turns red teaming off) shows G4 as OFF instead.
 
 Example:
   python -m agent_cicd.release_report --agent-dir agents/my-agent \
@@ -30,9 +30,10 @@ from .gates import FAIL, INCONCLUSIVE, PASS, REVIEW, judge_error, suite_of
 
 NOT_RUN = "NOT RUN"
 HUMAN = "HUMAN"
-ICON = {PASS: "✅", REVIEW: "🔍", INCONCLUSIVE: "⚠️", FAIL: "❌", NOT_RUN: "⛔", HUMAN: "👤"}
+OFF = "OFF"
+ICON = {PASS: "✅", REVIEW: "🔍", INCONCLUSIVE: "⚠️", FAIL: "❌", NOT_RUN: "⛔", HUMAN: "👤", OFF: "➖"}
 COLOR = {PASS: "#2e7d32", REVIEW: "#b26a00", INCONCLUSIVE: "#8d6e00", FAIL: "#c62828", NOT_RUN: "#616161",
-         HUMAN: "#1565c0"}
+         HUMAN: "#1565c0", OFF: "#9e9e9e"}
 MAX_FAILURES = 15
 
 
@@ -117,7 +118,10 @@ def quality_section(report: dict[str, Any] | None, thresholds: dict[str, Any]) -
     }
 
 
-def redteam_section(report: dict[str, Any] | None, policy: dict[str, Any]) -> dict[str, Any]:
+def redteam_section(report: dict[str, Any] | None, policy: dict[str, Any], required: bool = True) -> dict[str, Any]:
+    if not required:
+        return {"outcome": OFF, "reasons": ["Not part of this agent's pipeline (pipeline.yaml: gates.redteam is false)"],
+                "categories": [], "by_subcategory": [], "enabled_subcategories": []}
     if report is None:
         return {"outcome": NOT_RUN, "reasons": ["Red-team gate did not run (it only runs when the quality gate passes)"]}
     result = report.get("result") or {}
@@ -206,11 +210,12 @@ def rai_scorecard(q: dict[str, Any], r: dict[str, Any], p: dict[str, Any], thres
 
 def build_packet(quality: dict[str, Any] | None, redteam: dict[str, Any] | None, thresholds: dict[str, Any],
                  policy: dict[str, Any], context: dict[str, str],
-                 policies: dict[str, dict[str, Any] | None] | None = None) -> dict[str, Any]:
+                 policies: dict[str, dict[str, Any] | None] | None = None,
+                 redteam_required: bool = True) -> dict[str, Any]:
     q = quality_section(quality, thresholds)
-    r = redteam_section(redteam, policy)
+    r = redteam_section(redteam, policy, redteam_required)
     p = policy_section(policies or {})
-    gates = [q["outcome"], r["outcome"]] + ([p["outcome"]] if policies else [])
+    gates = [q["outcome"]] + ([r["outcome"]] if redteam_required else []) + ([p["outcome"]] if policies else [])
     ready = all(o in (PASS, REVIEW) for o in gates)
     flagged = REVIEW in gates
     return {"ready": ready, "flagged": flagged, "quality": q, "redteam": r, "policy": p,
@@ -470,7 +475,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--agent-dir", type=Path, required=True)
     parser.add_argument("--quality", type=Path)
-    parser.add_argument("--redteam", type=Path)
+    redteam = parser.add_mutually_exclusive_group()
+    redteam.add_argument("--redteam", type=Path)
+    redteam.add_argument("--no-redteam", action="store_true", help="red teaming is not part of this pipeline")
     parser.add_argument("--policy-report", action="append", default=[], metavar="ENV=PATH",
                         help="G2 config & residency report for one environment (repeatable)")
     parser.add_argument("--version", default="")
@@ -484,7 +491,7 @@ def main() -> int:
 
     eval_dir = args.agent_dir / "eval"
     thresholds = json.loads((eval_dir / "thresholds.json").read_text(encoding="utf-8"))
-    policy = json.loads((eval_dir / "redteam.json").read_text(encoding="utf-8"))
+    policy = {} if args.no_redteam else json.loads((eval_dir / "redteam.json").read_text(encoding="utf-8"))
     server, repo, run_id = (os.environ.get(k, "") for k in ("GITHUB_SERVER_URL", "GITHUB_REPOSITORY", "GITHUB_RUN_ID"))
     context = {"agent_name": args.agent_name, "version": args.version, "fingerprint": args.fingerprint,
                "test_version": args.test_version,
@@ -495,7 +502,8 @@ def main() -> int:
     for entry in args.policy_report:
         env, _, path = entry.partition("=")
         policies[env] = _load(Path(path))
-    packet = build_packet(_load(args.quality), _load(args.redteam), thresholds, policy, context, policies or None)
+    packet = build_packet(_load(args.quality), _load(args.redteam), thresholds, policy, context, policies or None,
+                          redteam_required=not args.no_redteam)
 
     markdown = render_markdown(packet)
     for path, text in ((args.markdown, markdown), (args.html, render_html(packet) if args.html else None)):
