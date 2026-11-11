@@ -1,0 +1,10 @@
+{
+  "_notes": "Run after every deploy (dev, test and prod); any failed check fails the deploy and, in prod, rolls back. Keep checks few and deterministic. Add a check that needs the agent's own tools or knowledge source, so each environment proves its connections work.",
+  "attempts": 2,
+  "checks": [
+    {
+      "id": "capability",
+      "prompt": "In one sentence, what kinds of questions can you help me with?"
+    }
+  ]
+}

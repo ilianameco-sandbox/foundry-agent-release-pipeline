@@ -1,0 +1,27 @@
+{
+  "kind": "prompt",
+  "instructions_file": "instructions.md",
+  "reasoning": {
+    "effort": "low"
+  },
+  "tools": [
+    {
+      "type": "azure_ai_search",
+      "azure_ai_search": {
+        "indexes": [
+          {
+            "query_type": "simple",
+            "top_k": 5,
+            "index_asset_id": "${SEARCH_INDEX_ASSET}"
+          }
+        ]
+      }
+    }
+  ],
+  "tool_descriptions": [
+    {
+      "name": "azure_ai_search",
+      "description": "Read-only search index of sample documents."
+    }
+  ]
+}

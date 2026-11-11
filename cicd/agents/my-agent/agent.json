@@ -1,0 +1,9 @@
+{
+  "kind": "prompt",
+  "instructions_file": "instructions.md",
+  "reasoning": {
+    "effort": "low"
+  },
+  "tools": [],
+  "tool_descriptions": []
+}

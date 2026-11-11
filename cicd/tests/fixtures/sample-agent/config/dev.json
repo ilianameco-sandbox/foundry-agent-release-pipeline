@@ -1,0 +1,10 @@
+{
+  "project_endpoint": "${FOUNDRY_PROJECT_ENDPOINT}",
+  "azure_resource_group": "rg-sample",
+  "agent_name": "sample-agent",
+  "model_deployment": "gpt-4.1",
+  "judge_deployment": "gpt-4.1",
+  "variables": {
+    "SEARCH_INDEX_ASSET": "sample-index/versions/1"
+  }
+}

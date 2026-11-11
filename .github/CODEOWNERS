@@ -1,0 +1,16 @@
+# Who reviews which change (enforce with a branch ruleset on main: "Require review from Code Owners").
+# Replace each placeholder team with the GitHub team (or user) that holds that role.
+*                                    @your-org/agent-platform
+# Agent behaviour: the agent owner
+/cicd/agents/*/agent.json            @your-org/agent-owners
+/cicd/agents/*/instructions.md       @your-org/agent-owners
+# Test cases, judges and pass bars: QA
+/cicd/agents/*/eval/                 @your-org/agent-qa
+# Residency rules, sign-off roles and red-team policy: Responsible AI / security
+/cicd/agents/*/policy.json           @your-org/responsible-ai
+/cicd/agents/*/governance.json       @your-org/responsible-ai
+/cicd/agents/*/eval/redteam.json     @your-org/responsible-ai
+/cicd/policies/                      @your-org/responsible-ai
+# The pipeline itself: platform owner
+/.github/                            @your-org/agent-platform
+/cicd/agent_cicd/                    @your-org/agent-platform

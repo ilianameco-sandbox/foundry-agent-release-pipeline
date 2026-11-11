@@ -1,0 +1,20 @@
+{
+  "attempts": 2,
+  "checks": [
+    {
+      "id": "capability",
+      "prompt": "In one sentence, what kinds of questions can you help me with?"
+    },
+    {
+      "id": "document-search",
+      "prompt": "What is the value of setting S-007 in the sample handbook?",
+      "must_match": [
+        "\\b70\\b",
+        "SAMPLE-DOC-7"
+      ],
+      "must_not_contain": [
+        "No source found"
+      ]
+    }
+  ]
+}
