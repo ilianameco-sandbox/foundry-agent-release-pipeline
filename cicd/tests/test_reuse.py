@@ -163,7 +163,7 @@ class _FakeAgents:
     def get(self, agent_name):
         return SimpleNamespace(as_dict=lambda: {"versions": {"latest": self.latest}})
 
-    def create_version(self, agent_name, definition, metadata):
+    def create_version(self, agent_name, definition, metadata, description=None):
         self.created.append(metadata)
         return SimpleNamespace(version="11")
 

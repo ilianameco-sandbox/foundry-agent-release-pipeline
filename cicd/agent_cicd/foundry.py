@@ -18,14 +18,22 @@ if hasattr(sys.stdout, "reconfigure"):
 
 
 @contextmanager
-def project_client(endpoint: str) -> Iterator[Any]:
+def project_client(endpoint: str, *, preview: bool = False) -> Iterator[Any]:
     from azure.ai.projects import AIProjectClient
     from azure.identity import AzureCliCredential
 
     # azure/login (OIDC) in GitHub Actions and `az login` locally both feed the Azure CLI credential.
+    # preview=True enables preview operations, such as calling a hosted agent through its own endpoint.
     with AzureCliCredential(process_timeout=120) as credential, \
-            AIProjectClient(endpoint=endpoint, credential=credential) as client:
+            AIProjectClient(endpoint=endpoint, credential=credential, allow_preview=preview) as client:
         yield client
+
+
+def agent_openai_client(client: Any, agent_name: str, kind: str) -> Any:
+    """OpenAI client that reaches the agent: hosted agents answer only on their own agent endpoint (the project
+    client must be opened with preview=True); prompt agents answer on the project's Responses API. Both accept
+    extra_body={"agent_reference": {...}} to pin the version."""
+    return client.get_openai_client(agent_name=agent_name) if kind == "hosted" else client.get_openai_client()
 
 
 def to_plain(value: Any) -> Any:

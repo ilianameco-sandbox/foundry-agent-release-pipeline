@@ -126,6 +126,7 @@ def deploy(agent_dir: Path, environment: str, dry_run: bool, force_new: bool = F
             agent_name=rendered.agent_name,
             definition=_sdk_definition(rendered.definition),
             metadata=metadata,
+            description=rendered.description[:512] or None,
         )
         # Recorded before waiting, so a hosted version that fails to start can still be rolled back.
         set_outputs(agent_name=rendered.agent_name, agent_version=str(created.version), previous_version=previous)

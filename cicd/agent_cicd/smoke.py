@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from .definition import render_agent
-from .foundry import project_client
+from .foundry import agent_openai_client, project_client
 
 PROMPT = "In one sentence, what kinds of questions can you help me with?"
 
@@ -68,7 +68,9 @@ def main() -> int:
     reference = {"name": rendered.agent_name, "version": str(args.version), "type": "agent_reference"}
     failed = 0
     try:
-        with project_client(rendered.project_endpoint) as client, client.get_openai_client() as openai_client:
+        hosted = rendered.kind == "hosted"
+        with project_client(rendered.project_endpoint, preview=hosted) as client, \
+                agent_openai_client(client, rendered.agent_name, rendered.kind) as openai_client:
             for check in smoke["checks"]:
                 for attempt in range(1, smoke["attempts"] + 1):
                     response = openai_client.responses.create(input=check["prompt"],

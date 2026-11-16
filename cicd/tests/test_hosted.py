@@ -179,8 +179,9 @@ class FakeAgents:
             raise ResourceNotFoundError("no agent yet")
         return SimpleNamespace(as_dict=lambda: {"versions": {"latest": self.latest}})
 
-    def create_version(self, agent_name, definition, metadata):
+    def create_version(self, agent_name, definition, metadata, description=None):
         self.created.append((agent_name, definition, metadata))
+        self.descriptions = [*getattr(self, "descriptions", []), description]
         return SimpleNamespace(version=str(10 + len(self.created)))
 
     def get_version(self, agent_name, agent_version):
@@ -237,6 +238,7 @@ def test_hosted_deploy_copies_the_image_creates_the_version_and_waits(tmp_path, 
     assert name == "sample-hosted" and definition.__class__.__name__ == "HostedAgentDefinition"
     assert definition.as_dict()["container_configuration"] == {"image": f"{PROD_ACR}/sample-hosted@{DIGEST}"}
     assert metadata["image_digest"] == DIGEST and metadata["model_version"] == "gpt-4.1@2025-04-14"
+    assert agents.descriptions == ["Answers questions about sample documents."]
     assert agents.statuses == ["active"]
 
 
@@ -414,3 +416,44 @@ def test_promote_refuses_hosted_agents_without_calling_azure(tmp_path, monkeypat
     monkeypatch.setattr("agent_cicd.promote.project_client", lambda endpoint: pytest.fail("called Azure"))
     assert promote(make_agent(tmp_path), "dev", "latest", None, dry_run=True, body_path=None) == 1
     assert "nothing to export from the portal" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------- smoke routing
+
+@pytest.mark.parametrize("kind", ["hosted", "prompt"])
+def test_smoke_calls_hosted_agents_on_their_own_endpoint(tmp_path, monkeypatch, kind):
+    from contextlib import contextmanager, nullcontext
+
+    from agent_cicd import smoke as smoke_module
+
+    agent_dir = make_agent(tmp_path, agent={"kind": kind, "instructions_file": "instructions.md"})
+    (agent_dir / "instructions.md").write_text("Answer briefly.", encoding="utf-8")
+    (agent_dir / "eval").mkdir()
+    (agent_dir / "eval" / "smoke.json").write_text(json.dumps(
+        {"attempts": 1, "checks": [{"id": "hello", "prompt": "Hi", "must_match": ["Hello"]}]}), encoding="utf-8")
+    monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", ENV["FOUNDRY_PROJECT_ENDPOINT"])
+    calls = {}
+
+    class Responses:
+        def create(self, **kwargs):
+            calls["create"] = kwargs
+            return SimpleNamespace(output_text="Hello there")
+
+    class Client:
+        def get_openai_client(self, **kwargs):
+            calls["openai"] = kwargs
+            return nullcontext(SimpleNamespace(responses=Responses()))
+
+    @contextmanager
+    def client(endpoint, preview=False):
+        calls["preview"] = preview
+        yield Client()
+
+    monkeypatch.setattr(smoke_module, "project_client", client)
+    monkeypatch.setattr("sys.argv", ["smoke", "--agent-dir", str(agent_dir), "--env", "dev", "--version", "3"])
+    assert smoke_module.main() == 0
+    hosted = kind == "hosted"
+    assert calls["preview"] is hosted
+    assert calls["openai"] == ({"agent_name": "sample-hosted"} if hosted else {})
+    assert calls["create"]["extra_body"]["agent_reference"] == {"name": "sample-hosted", "version": "3",
+                                                                "type": "agent_reference"}

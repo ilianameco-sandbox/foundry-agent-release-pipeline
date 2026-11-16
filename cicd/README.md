@@ -148,13 +148,14 @@ A hosted agent is your own code (Microsoft Agent Framework, LangGraph, or any fr
 
 ### To verify on the first live run
 
-The hosted path is unit-tested and dry-run validated, but not yet proven against a live Foundry project. Release one hosted agent through non-production Foundry projects and check:
+The hosted path is unit-tested and dry-run validated. Deploy and smoke checks have been proven against a live Foundry project (dev); release one hosted agent through non-production Foundry projects and check the rest:
 
 - [ ] **Evaluation (G3) and red teaming (G4) can target a hosted version** (`azure_ai_agent` target with name and version).
-- [ ] **Smoke checks reach the new version.** They call the agent with an `agent_reference` (name + version) on the project's Responses endpoint. If hosted agents only answer on their own endpoint (`{project}/agents/{name}/endpoint/protocols/openai`), switch `smoke.py` to `get_openai_client(agent_name=…)`. Then check which version the endpoint routes to.
+- [x] **Smoke checks reach the new version.** Hosted agents answer only on their own endpoint (`{project}/agents/{name}/endpoint/protocols/openai`), so `smoke.py` opens it with `get_openai_client(agent_name=…)` (a preview operation) and still pins the version with `agent_reference`; an unknown version returns 404, so the pin is honored.
 - [ ] **UAT ratings and trace harvesting find hosted traces.** Both read `invoke_agent` spans from App Insights `dependencies`; hosted agents also log to `requests` (`azure.ai.agentserver.*`), so the KQL may need that table.
 - [ ] **A rebuilt identical commit** creates a new version only when the digest changes. Docker builds are rarely byte-identical, so expect one new version per release.
-- [ ] **Registry permissions:** the Foundry project's identity can pull from each environment's registry, and each pipeline identity can import into it.
+- [ ] **Registry permissions:** the Foundry project's identity pulls from the registry with **AcrPull** (proven in dev); still check that each pipeline identity can import into each environment's registry.
+- [x] **Runtime identity:** each hosted agent gets its own Entra identity (`instance_identity` on the version). Grant it data roles on what its code reads (for example **Search Index Data Reader**); model calls through the project worked without an extra role. Protocol `responses` version `2.0.0` works with `agent-framework-foundry-hosting`.
 
 ## G1: code & security
 
