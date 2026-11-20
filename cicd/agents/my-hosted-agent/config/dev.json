@@ -1,4 +1,5 @@
 {
+  "_about": "Replace every <...> with your own names. Leave every ${...} exactly as it is: the pipeline fills it in at run time from this environment's GitHub Environment secrets and variables, or from cicd/.env when you run locally, so endpoints never go into Git.",
   "project_endpoint": "${FOUNDRY_PROJECT_ENDPOINT}",
   "azure_resource_group": "<resource group of the Foundry account>",
   "agent_name": "<agent name in Foundry>",
