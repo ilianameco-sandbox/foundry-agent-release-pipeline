@@ -303,7 +303,7 @@ def _mean_note(q: dict[str, Any], criterion: str) -> str:
 
 REDACTION_NOTE = ("Foundry hides the attack prompts of cloud red-team scans; each row shows the attack category and "
                   "technique, the agent's actual response and the evaluator's reasoning, so you can judge the response "
-                  "yourself. The full conversation is in the Foundry run.")
+                  "yourself.")
 
 
 def _sample_summary(r: dict[str, Any]) -> str:

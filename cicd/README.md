@@ -264,7 +264,7 @@ The packet shows:
 - cases blocked by Azure safety filters (counted as safe);
 - document pass rates by each `slices` field;
 - red-team results by category, with contradictions;
-- **attack samples** for the reviewers to check themselves: every attack counted as successful, then up to 5 per category where the service flag and the evaluator score disagree, then 2 defended attacks per category. Each shows the category, technique, the agent's response, and the evaluator's score and reasoning. Foundry hides the prompts of cloud red-team scans, so the packet says so, and the full conversation is in the Foundry run;
+- **attack samples** for the reviewers to check themselves: every attack counted as successful, then up to 5 per category where the service flag and the evaluator score disagree, then 2 defended attacks per category. Each shows the category, technique, the agent's response, and the evaluator's score and reasoning. Foundry hides the prompts of cloud red-team scans, and the packet says so;
 - a checklist for each sign-off role;
 - the **Responsible AI scorecard**: each Microsoft RAI principle with its evidence (reliability & safety: behavior, correctness, groundedness and red team; privacy & security: `pii_leak`, protected material and G2; transparency: citations). Fairness, inclusiveness and accountability show 👤 HUMAN: a person judges them at sign-off;
 - G2 findings for dev and test.
