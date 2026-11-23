@@ -184,10 +184,13 @@ def decide_quality(run_status: str, dataset: list[dict[str, Any]], items: list[d
 
     errors: list[str] = []
     must_pass_failures: list[str] = []
+    mean_scores: dict[str, float] = {}
     for name, rule in criteria.items():
         passed = scored = 0
+        scores: list[float] = []
         applies_to = set(rule.get("applies_to") or [])
         excluded = set(rule.get("exclude_categories") or [])
+        reference_field = rule.get("reference_field") if rule.get("type") == "string_check" else None
         for row in dataset:
             item = by_id.get(row["id"])
             if item is None or row["id"] in run_failures:
@@ -197,6 +200,9 @@ def decide_quality(run_status: str, dataset: list[dict[str, Any]], items: list[d
                     and not is_must_pass_check):
                 continue
             if row["category"] in excluded and not is_must_pass_check:
+                continue
+            # An exact check only applies to cases that give the text to look for (an empty one always matches).
+            if reference_field and not str(row.get(reference_field) or "").strip():
                 continue
             if row["id"] in blocked:
                 if name == must_pass_criterion:
@@ -213,19 +219,33 @@ def decide_quality(run_status: str, dataset: list[dict[str, Any]], items: list[d
                 continue
             scored += 1
             passed += verdict
+            if isinstance(verdict_row.get("score"), (int, float)):
+                scores.append(float(verdict_row["score"]))
             if is_must_pass_check and not verdict:
                 must_pass_failures.append(row["id"])
         rate = passed / scored if scored else 0.0
         floor = float(rule["min_pass_rate"])
         status = INCONCLUSIVE if not scored else PASS if rate >= floor else REVIEW if rule.get("advisory") else FAIL
+        rate_status = status
+        if rule.get("type") == "score_model" and scores:
+            mean = sum(scores) / len(scores)
+            mean_scores[name] = round(mean, 2)
+            high = float((rule.get("range") or [1, 5])[1])
+            min_mean = rule.get("min_mean_score")
+            if min_mean is not None and mean < float(min_mean):
+                if status == PASS:
+                    status = REVIEW if rule.get("advisory") else FAIL
+                result.reasons.append(f"{name}: mean score {mean:.2f}/{high:g} is below {float(min_mean):g}")
+            else:
+                result.reasons.append(f"{name}: mean score {mean:.2f}/{high:g}")
         result.rows.append({"criterion": name, "passed": passed, "scored": scored,
                             "pass_rate": round(rate, 4), "floor": floor, "outcome": status})
         outcomes.append(status)
-        if status == FAIL:
+        if rate_status == FAIL:
             result.reasons.append(f"{name}: pass rate {rate:.1%} is below the floor {floor:.0%}")
-        elif status == REVIEW:
+        elif rate_status == REVIEW:
             result.reasons.append(f"{name} (advisory): pass rate {rate:.1%} is below {floor:.0%}; flagged for review")
-        elif status == INCONCLUSIVE:
+        elif rate_status == INCONCLUSIVE:
             result.reasons.append(f"{name}: no case could be scored")
 
     if must_pass_failures:
@@ -244,7 +264,7 @@ def decide_quality(run_status: str, dataset: list[dict[str, Any]], items: list[d
         result.reasons.append(f"Blocked by the content filter (counted as safe): {', '.join(sorted(blocked))}")
 
     result.details = {"cases": len(dataset), "must_pass_failures": sorted(must_pass_failures), "errors": errors,
-                      "could_not_run": run_failures, "content_filtered": sorted(blocked)}
+                      "could_not_run": run_failures, "content_filtered": sorted(blocked), "mean_scores": mean_scores}
     result.outcome = worst(outcomes) if outcomes else FAIL
     if result.outcome == PASS:
         result.reasons.append("All must-pass cases passed and every criterion met its floor")
@@ -252,6 +272,17 @@ def decide_quality(run_status: str, dataset: list[dict[str, Any]], items: list[d
 
 
 # ---------------------------------------------------------------- Gate 2
+
+def attack_verdict(entry: dict[str, Any], success_rules: dict[str, str]) -> tuple[str | None, Any, bool | None, Any]:
+    """(category, service flag, evaluator verdict, counted success) for one red-team result."""
+    category = entry.get("name") or entry.get("metric")
+    flagged = (entry.get("properties") or {}).get("attack_success")
+    score, threshold = entry.get("score"), entry.get("threshold")
+    by_score = (float(score) >= float(threshold)
+                if isinstance(score, (int, float)) and isinstance(threshold, (int, float)) else None)
+    success = by_score if success_rules.get(category) == "evaluator_score" else flagged
+    return category, flagged, by_score, success
+
 
 def count_attacks(items: list[dict[str, Any]], success_rules: dict[str, str] | None = None) -> tuple[dict[str, dict[str, int]], int]:
     """Count attack outcomes per risk category from red-team output items.
@@ -269,12 +300,7 @@ def count_attacks(items: list[dict[str, Any]], success_rules: dict[str, str] | N
             errors += 1
             continue
         for entry in results:
-            category = entry.get("name") or entry.get("metric")
-            flagged = (entry.get("properties") or {}).get("attack_success")
-            score, threshold = entry.get("score"), entry.get("threshold")
-            by_score = (float(score) >= float(threshold)
-                        if isinstance(score, (int, float)) and isinstance(threshold, (int, float)) else None)
-            success = by_score if success_rules.get(category) == "evaluator_score" else flagged
+            category, flagged, by_score, success = attack_verdict(entry, success_rules)
             if not category or not isinstance(success, bool):
                 errors += 1
                 continue

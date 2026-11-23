@@ -297,3 +297,72 @@ def test_judge_error_is_not_a_verdict_and_is_retried():
     assert decided.outcome == INCONCLUSIVE
     assert "SCOPE-02" not in decided.details["must_pass_failures"]
     assert any("judge error 429" in e for e in decided.details["errors"])
+
+
+# ---------------------------------------------------------------- exact match and rubric scoring
+
+EXACT_AND_RUBRIC = {
+    "must_pass_criterion": "expected_behavior",
+    "criteria": {
+        "citation_exact": {"type": "string_check", "reference_field": "expected_citation", "min_pass_rate": 1.0,
+                           "applies_to": ["documents"]},
+        "clarity": {"type": "score_model", "rubric": "5 = clear and complete ... 1 = wrong or unusable",
+                    "pass_score": 4, "min_pass_rate": 0.5, "min_mean_score": 4.0, "applies_to": ["documents"]},
+    },
+}
+
+
+def test_exact_match_and_rubric_criteria_are_sent_to_foundry():
+    by_name = {c["name"]: c for c in build_criteria(EXACT_AND_RUBRIC, "judge")}
+    assert by_name["citation_exact"] == {"type": "string_check", "name": "citation_exact",
+                                         "input": "{{sample.output_text}}", "reference": "{{item.expected_citation}}",
+                                         "operation": "ilike"}
+    rubric = by_name["clarity"]
+    assert rubric["type"] == "score_model" and rubric["model"] == "judge"
+    assert rubric["range"] == [1.0, 5.0] and rubric["pass_threshold"] == 4.0
+    assert rubric["input"][0]["content"].endswith("5 = clear and complete ... 1 = wrong or unusable")
+    assert "{{item.reference_facts}}" in rubric["input"][1]["content"]
+
+
+@pytest.mark.parametrize("rule, error", [
+    ({"type": "string_check", "reference_field": "nope", "min_pass_rate": 1}, "reference_field"),
+    ({"type": "string_check", "reference_field": "expected_citation", "operation": "regex", "min_pass_rate": 1},
+     "operation"),
+    ({"type": "score_model", "pass_score": 4, "min_pass_rate": 1}, "rubric"),
+    ({"type": "score_model", "rubric": "r", "pass_score": 7, "min_pass_rate": 1}, "pass_score"),
+])
+def test_bad_exact_match_or_rubric_config_is_rejected(rule, error):
+    with pytest.raises(ValueError, match=error):
+        build_criteria({"criteria": {"x": rule}}, "judge")
+
+
+def _exact_and_rubric_run(scores):
+    docs = [dict(r) for r in DATASET if r["suite"] == "documents"][:4]
+    docs[0]["expected_citation"], docs[1]["expected_citation"] = "SAMPLE-DOC-1", "SAMPLE-DOC-2"
+    items = []
+    for row, score in zip(docs, scores):
+        results = [{"name": "clarity", "passed": score >= 4, "score": score}]
+        if row.get("expected_citation"):
+            results.append({"name": "citation_exact", "passed": True})
+        items.append({"datasource_item": dict(row), "results": results})
+    return docs, items
+
+
+def test_exact_match_only_scores_cases_that_give_the_text():
+    docs, items = _exact_and_rubric_run([5, 5, 4, 4])
+    decided = decide_quality("completed", docs, items, EXACT_AND_RUBRIC)
+    assert decided.outcome == PASS
+    row = next(r for r in decided.rows if r["criterion"] == "citation_exact")
+    assert (row["passed"], row["scored"]) == (2, 2)
+    assert decided.details["mean_scores"] == {"clarity": 4.5}
+
+
+@pytest.mark.parametrize("advisory, outcome", [(False, FAIL), (True, REVIEW)])
+def test_low_mean_rubric_score_blocks_even_when_the_pass_rate_is_met(advisory, outcome):
+    thresholds = json.loads(json.dumps(EXACT_AND_RUBRIC))
+    thresholds["criteria"]["clarity"]["advisory"] = advisory
+    docs, items = _exact_and_rubric_run([5, 4, 2, 2])
+    decided = decide_quality("completed", docs, items, thresholds)
+    assert decided.outcome == outcome
+    assert "clarity: mean score 3.25/5 is below 4" in decided.reasons
+    assert not any("clarity" in r and "pass rate" in r for r in decided.reasons)

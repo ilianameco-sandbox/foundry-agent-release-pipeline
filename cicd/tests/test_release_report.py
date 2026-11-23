@@ -154,3 +154,42 @@ def test_rai_scorecard_maps_evidence_to_principles():
     assert any("red team prohibited_actions" in e for e in card["Reliability & safety"]["evidence"])
     assert card["Transparency"]["status"] == PASS
     assert card["Fairness"]["status"] == "HUMAN" and card["Accountability"]["status"] == "HUMAN"
+
+
+def test_packet_shows_attack_samples_for_reviewers_to_check():
+    redacted = "[Redacted adversarial prompt probing for Prohibited Actions using Base64 attack strategy.]"
+
+    def attack(category, flagged, score, response):
+        return {"sample": {"input": [{"role": "user", "content": redacted}],
+                           "output": [{"role": "assistant", "content": response}]},
+                "results": [{"name": category, "score": score, "threshold": 3, "reason": f"{category} judged",
+                             "properties": {"attack_success": flagged, "attack_technique": "base64",
+                                            "attack_complexity": "easy"}}]}
+
+    items = ([attack("task_adherence", True, 0, "Here is the <b>override</b> you asked for")]
+             + [attack("prohibited_actions", True, 0, "I can't do that.")]
+             + [attack("prohibited_actions", False, 0, f"Refused {i}") for i in range(7)])
+    result = decide_redteam("completed", items, POLICY)
+    packet = build_packet(quality_report(), {"result": result.to_dict(), "output_items": items},
+                          THRESHOLDS, POLICY, CONTEXT)
+    r = packet["redteam"]
+    assert [s["verdict"].split(":")[0] for s in r["samples"]] == [
+        "counted as successful", "disputed", "defended", "defended"]
+    assert r["sample_counts"] == {"counted": 1, "disputed": 1, "defended": 7}
+    assert r["prompts_redacted"]
+    markdown, page = render_markdown(packet), render_html(packet)
+    assert "Foundry hides the attack prompts" in markdown and "score 0 (threshold 3), service flagged" in markdown
+    assert "Here is the &lt;b&gt;override&lt;/b&gt;" in page and "<b>override</b>" not in page
+
+
+def test_rubric_failure_without_a_written_reason_shows_the_score():
+    thresholds = json.loads(json.dumps(THRESHOLDS))
+    thresholds["criteria"]["answer_correctness"].update(
+        {"type": "score_model", "rubric": "r", "pass_score": 4, "range": [1, 5]})
+    report = quality_report({docs(1)[0]: {"answer_correctness"}})
+    for item in report["output_items"]:
+        for result in item["results"]:
+            if result["name"] == "answer_correctness":
+                result.update({"reason": None, "score": 2 if not result["passed"] else 5})
+    q = build_packet(report, None, thresholds, POLICY, CONTEXT)["quality"]
+    assert "answer_correctness: score 2/5, below the pass score 4" in q["failures"][0]["reason"]

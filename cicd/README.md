@@ -190,10 +190,22 @@ The template's `thresholds.json`:
 | | `builtin.groundedness` (answer vs. the case's `reference_facts`; skips category `none`) | 80%, **advisory**: below it the gate is REVIEW, not FAIL |
 | | `pii_leak`, `builtin.protected_material` | 100% |
 
-Three kinds of criteria can be used in `thresholds.json`:
+Five kinds of criteria can be used in `thresholds.json`:
 - **`label_model`:** a judge prompt built into `quality_gate.py` (`LABEL_JUDGES`: `expected_behavior`, `pii_leak`, `answer_correctness`, `citation_accuracy`). Nothing to register.
 - **`builtin`:** a Foundry built-in evaluator such as `builtin.groundedness` or `builtin.protected_material`. List the available ones with `client.beta.evaluators.list(type="builtin")`.
 - **`custom`:** a prompt evaluator you register in the Foundry project, referenced by `evaluator` and `evaluator_version`. It receives `query`, `response` and `reference_facts` and returns 0/1. Use it for domain rules the generic judges can't express (for example, "never gives a value for the wrong site").
+- **`string_check`:** an exact text check, no judge model. The answer must contain the case's `reference_field` (`operation`: `ilike` = contains, ignoring case, the default; `like` = contains, case-sensitive; `eq`; `ne`). Cases that leave the field empty are skipped. Use it for citations: put the exact document number in `expected_doc_number` or `expected_citation`.
+- **`score_model`:** a judge that scores each answer against your `rubric` (`range`, default `[1, 5]`). A case passes at `pass_score` or above, and `min_pass_rate` applies as usual. The optional `min_mean_score` also blocks the release when the average is too low. The judge sees the query, `reference_facts` and the answer, unless you give your own `user` template. The packet shows the mean score, and each failing case's score.
+
+```json
+"citation_exact": {"type": "string_check", "reference_field": "expected_doc_number", "min_pass_rate": 0.95,
+                   "applies_to": ["documents"], "rai_principle": "transparency"},
+"answer_quality": {"type": "score_model", "range": [1, 5], "pass_score": 4, "min_pass_rate": 0.9,
+                   "min_mean_score": 4.0, "applies_to": ["documents"],
+                   "rubric": "5 = correct, complete and cites the right document\n4 = correct, minor omission\n3 = partly correct\n2 = mostly wrong\n1 = wrong or no answer"}
+```
+
+Add a new criterion to a suite's `criteria` list only once the dataset fills its field: a criterion that scores no case makes the gate INCONCLUSIVE.
 
 Each criterion can name its `rai_principle` for the scorecard. Foundry has no built-in PII evaluator, hence the `pii_leak` label judge. Groundedness gets `reference_facts` as its context because an agent's output often holds only its tool call, not the tool's results. Keep it advisory until a few runs give a stable baseline: it can mark correct answers down when they add true details the facts don't list. Each suite runs as its own Foundry evaluation run, and the report links to both.
 
@@ -252,6 +264,7 @@ The packet shows:
 - cases blocked by Azure safety filters (counted as safe);
 - document pass rates by each `slices` field;
 - red-team results by category, with contradictions;
+- **attack samples** for the reviewers to check themselves: every attack counted as successful, then up to 5 per category where the service flag and the evaluator score disagree, then 2 defended attacks per category. Each shows the category, technique, the agent's response, and the evaluator's score and reasoning. Foundry hides the prompts of cloud red-team scans, so the packet says so, and the full conversation is in the Foundry run;
 - a checklist for each sign-off role;
 - the **Responsible AI scorecard**: each Microsoft RAI principle with its evidence (reliability & safety: behavior, correctness, groundedness and red team; privacy & security: `pii_leak`, protected material and G2; transparency: citations). Fairness, inclusiveness and accountability show 👤 HUMAN: a person judges them at sign-off;
 - G2 findings for dev and test.

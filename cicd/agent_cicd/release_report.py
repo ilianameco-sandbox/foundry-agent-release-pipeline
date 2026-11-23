@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from .foundry import add_summary, set_outputs
-from .gates import FAIL, INCONCLUSIVE, PASS, REVIEW, judge_error, suite_of
+from .gates import FAIL, INCONCLUSIVE, PASS, REVIEW, attack_verdict, judge_error, suite_of
 
 NOT_RUN = "NOT RUN"
 HUMAN = "HUMAN"
@@ -35,6 +35,10 @@ ICON = {PASS: "✅", REVIEW: "🔍", INCONCLUSIVE: "⚠️", FAIL: "❌", NOT_RU
 COLOR = {PASS: "#2e7d32", REVIEW: "#b26a00", INCONCLUSIVE: "#8d6e00", FAIL: "#c62828", NOT_RUN: "#616161",
          HUMAN: "#1565c0", OFF: "#9e9e9e"}
 MAX_FAILURES = 15
+MAX_ATTACK_SAMPLES = 25      # attacks counted as successful, all shown up to this cap
+DISPUTED_PER_CATEGORY = 5    # service flag and evaluator score disagree
+DEFENDED_PER_CATEGORY = 2    # defended attacks, for comparison
+MD_ATTACK_SAMPLES = 10       # the markdown summary shows fewer than the HTML packet
 
 
 def _load(path: Path | None) -> dict[str, Any] | None:
@@ -53,6 +57,18 @@ def _clip(text: Any, limit: int) -> str:
 
 def _rate(passed: int, total: int) -> str:
     return f"{passed / total:.0%}" if total else "–"
+
+
+def _verdict_reason(result: dict[str, Any], rule: dict[str, Any], case: dict[str, Any]) -> str:
+    """Why a case failed a criterion; exact checks and rubric scores often come back without a written reason."""
+    if result.get("reason"):
+        return str(result["reason"])
+    if rule.get("type") == "string_check":
+        return f"answer does not contain '{case.get(rule.get('reference_field'))}' ({rule.get('operation', 'ilike')})"
+    if rule.get("type") == "score_model" and isinstance(result.get("score"), (int, float)):
+        high = (rule.get("range") or [1, 5])[1]
+        return f"score {result['score']:g}/{high:g}, below the pass score {rule.get('pass_score')}"
+    return "no reason given"
 
 
 # ---------------------------------------------------------------- model
@@ -81,9 +97,12 @@ def quality_section(report: dict[str, Any] | None, thresholds: dict[str, Any]) -
         suite = suite_of(ds)
         judges = (thresholds.get("suites", {}).get(suite) or {}).get("criteria") or (
             doc_judges if suite == "documents" else ["expected_behavior"])
-        # A criterion that skips this case's category (e.g. groundedness on "no source" questions) isn't a failure.
+        # A criterion that skips this case's category (e.g. groundedness on "no source" questions) isn't a failure,
+        # nor is an exact check on a case that gives no text to look for.
         judges = [j for j in judges
-                  if str(ds.get("category")) not in (criteria.get(j, {}).get("exclude_categories") or [])]
+                  if str(ds.get("category")) not in (criteria.get(j, {}).get("exclude_categories") or [])
+                  and not (criteria.get(j, {}).get("type") == "string_check"
+                           and not str(ds.get(criteria[j].get("reference_field")) or "").strip())]
         if ds.get("id") in excluded:
             continue
         if suite == "documents":
@@ -102,7 +121,8 @@ def quality_section(report: dict[str, Any] | None, thresholds: dict[str, Any]) -
                 "id": ds.get("id"), "suite": suite, "must_pass": bool(ds.get("must_pass")),
                 "judges": failed, "query": ds.get("query"),
                 "answer": ds.get("sample.output_text") or "",
-                "reason": " | ".join(f"{j}: {(results.get(j) or {}).get('reason') or 'no reason given'}" for j in failed),
+                "reason": " | ".join(f"{j}: {_verdict_reason(results.get(j) or {}, criteria.get(j, {}), ds)}"
+                                     for j in failed),
                 "trap": ds.get("trap"), "modality": ds.get("modality"),
             })
     # Must-pass and zero-tolerance (100% bar) failures first: they are what blocks a release.
@@ -114,7 +134,7 @@ def quality_section(report: dict[str, Any] | None, thresholds: dict[str, Any]) -
         "failure_count": len(failures), "suites": details.get("suites") or {},
         "could_not_run": details.get("could_not_run") or {}, "content_filtered": details.get("content_filtered") or [],
         "not_scored": not_scored, "judge_retries": details.get("judge_retries") or {},
-        "report_url": details.get("report_url"),
+        "report_url": details.get("report_url"), "mean_scores": details.get("mean_scores") or {},
     }
 
 
@@ -144,6 +164,53 @@ def redteam_section(report: dict[str, Any] | None, policy: dict[str, Any], requi
         "strategies": policy.get("attack_strategies", []), "turns": policy.get("num_turns"),
         "by_subcategory": sorted(([k, v[0], v[1]] for k, v in by_subcategory.items() if v[0]),
                                  key=lambda r: -r[1]),
+        **attack_samples(report.get("output_items") or [], policy),
+    }
+
+
+def attack_samples(items: list[dict[str, Any]], policy: dict[str, Any]) -> dict[str, Any]:
+    """Attacks for the reviewers to check themselves: every one counted as successful, then the ones where the
+    service flag and the evaluator score disagree, then a few defended ones per category for comparison."""
+    rules = {c: r.get("success_rule", "service") for c, r in (policy.get("categories") or {}).items()}
+    counted: list[dict[str, Any]] = []
+    disputed: list[dict[str, Any]] = []
+    defended: list[dict[str, Any]] = []
+    prompts: list[str] = []
+    for item in items:
+        sample = item.get("sample") or {}
+        prompt = " ".join(str(m.get("content") or "") for m in sample.get("input") or []
+                          if isinstance(m, dict) and m.get("role") == "user")
+        response = " ".join(str(m.get("content") or "") for m in sample.get("output") or [] if isinstance(m, dict))
+        prompts.append(prompt)
+        for result in item.get("results") or []:
+            if not isinstance(result, dict):
+                continue
+            category, flagged, by_score, success = attack_verdict(result, rules)
+            if not category:
+                continue
+            props = result.get("properties") or {}
+            entry = {"category": category, "technique": props.get("attack_technique") or "–",
+                     "complexity": props.get("attack_complexity") or "–", "service_flag": flagged,
+                     "score": result.get("score"), "threshold": result.get("threshold"),
+                     "reason": result.get("reason") or "", "prompt": prompt, "response": response}
+            if success is True:
+                counted.append({**entry, "verdict": "counted as successful"})
+            elif isinstance(flagged, bool) and isinstance(by_score, bool) and flagged != by_score:
+                disputed.append({**entry, "verdict": "disputed: service flagged it, evaluator score is below threshold"
+                                 if flagged else "disputed: evaluator score is at threshold, service did not flag it"})
+            else:
+                defended.append({**entry, "verdict": "defended"})
+    selected = counted[:MAX_ATTACK_SAMPLES]
+    for pool, per_category in ((disputed, DISPUTED_PER_CATEGORY), (defended, DEFENDED_PER_CATEGORY)):
+        seen: dict[str, int] = defaultdict(int)
+        for entry in pool:
+            if seen[entry["category"]] < per_category:
+                seen[entry["category"]] += 1
+                selected.append(entry)
+    return {
+        "samples": selected,
+        "sample_counts": {"counted": len(counted), "disputed": len(disputed), "defended": len(defended)},
+        "prompts_redacted": bool(prompts) and all(p.lstrip().startswith("[Redacted") for p in prompts),
     }
 
 
@@ -229,6 +296,29 @@ def _flag_note(row: dict[str, Any]) -> str:
     return f" ({n} service flags disagree with the evaluator score)" if n else ""
 
 
+def _mean_note(q: dict[str, Any], criterion: str) -> str:
+    mean = (q.get("mean_scores") or {}).get(criterion)
+    return f" (mean score {mean:g})" if mean is not None else ""
+
+
+REDACTION_NOTE = ("Foundry hides the attack prompts of cloud red-team scans; each row shows the attack category and "
+                  "technique, the agent's actual response and the evaluator's reasoning, so you can judge the response "
+                  "yourself. The full conversation is in the Foundry run.")
+
+
+def _sample_summary(r: dict[str, Any]) -> str:
+    n = r.get("sample_counts") or {}
+    return (f"{n.get('counted', 0)} counted as successful, {n.get('disputed', 0)} disputed, "
+            f"{n.get('defended', 0)} defended")
+
+
+def _score_text(s: dict[str, Any]) -> str:
+    flag = {True: "flagged", False: "not flagged"}.get(s.get("service_flag"), "no flag")
+    if isinstance(s.get("score"), (int, float)) and isinstance(s.get("threshold"), (int, float)):
+        return f"score {s['score']:g} (threshold {s['threshold']:g}), service {flag}"
+    return f"service {flag}"
+
+
 def render_markdown(packet: dict[str, Any]) -> str:
     c, q, r, p = packet["context"], packet["quality"], packet["redteam"], packet.get("policy") or {}
     if packet["ready"]:
@@ -278,7 +368,8 @@ def render_markdown(packet: dict[str, Any]) -> str:
     if q.get("criteria"):
         lines += ["## G3 · Evaluation results", "| Criterion | Suite | Passed | Pass rate | Bar | Outcome |",
                   "|---|---|---|---|---|---|"]
-        lines += [f"| {row['criterion']} | {row['suite']} | {row['passed']}/{row['scored']} | {row['pass_rate']:.1%} | "
+        lines += [f"| {row['criterion']}{_mean_note(q, row['criterion'])} | {row['suite']} | {row['passed']}/{row['scored']} | "
+                  f"{row['pass_rate']:.1%} | "
                   f"{row['floor']:.0%} | {ICON.get(row['outcome'], '')} {row['outcome']} |" for row in q["criteria"]]
         for field, values in q.get("slices", {}).items():
             judges = sorted({j for v in values.values() for j in v})
@@ -313,6 +404,17 @@ def render_markdown(packet: dict[str, Any]) -> str:
         if r["by_subcategory"]:
             lines += ["", "Successful attacks by sub-category: "
                       + ", ".join(f"{name} ({k}/{n})" for name, k, n in r["by_subcategory"][:10])]
+        if r.get("samples"):
+            lines += ["", f"**Attack samples to check yourself** ({_sample_summary(r)}; top {MD_ATTACK_SAMPLES} here, "
+                      "more in the HTML packet)", ""]
+            if r.get("prompts_redacted"):
+                lines += [f"> {REDACTION_NOTE}", ""]
+            lines += ["| Category | Technique | Verdict | Attack prompt | Agent response | Evaluator |",
+                      "|---|---|---|---|---|---|"]
+            lines += [f"| {s['category']} | {s['technique']} ({s['complexity']}) | {s['verdict']} | "
+                      f"{_clip(s['prompt'], 140)} | {_clip(s['response'], 200)} | "
+                      f"{_score_text(s)}: {_clip(s['reason'], 200)} |".replace("\n", " ")
+                      for s in r["samples"][:MD_ATTACK_SAMPLES]]
         lines.append("")
     lines += [
         "## For the sign-off reviewers",
@@ -396,7 +498,7 @@ details{{margin:8px 0}} li{{margin:4px 0}}
     if q.get("criteria"):
         parts += ["<h2>G3 · Evaluation results</h2>",
                   _table(["Criterion", "Suite", "Passed", "Pass rate", "Bar", "Outcome"],
-                         [[e(row["criterion"]), e(row["suite"]), f"{row['passed']}/{row['scored']}", f"{row['pass_rate']:.1%}",
+                         [[e(row["criterion"] + _mean_note(q, row["criterion"])), e(row["suite"]), f"{row['passed']}/{row['scored']}", f"{row['pass_rate']:.1%}",
                            f"{row['floor']:.0%}", _badge(row["outcome"])] for row in q["criteria"]])]
         for field, values in q.get("slices", {}).items():
             judges = sorted({j for v in values.values() for j in v})
@@ -422,6 +524,13 @@ details{{margin:8px 0}} li{{margin:4px 0}}
         if r["by_subcategory"]:
             parts.append(_table(["Sub-category with successful attacks", "Successful / attempted"],
                                 [[e(name), f"{k}/{n}"] for name, k, n in r["by_subcategory"]]))
+        if r.get("samples"):
+            parts += [f"<h3>Attack samples to check yourself ({e(_sample_summary(r))})</h3>",
+                      f"<p class='muted'>{e(REDACTION_NOTE)}</p>" if r.get("prompts_redacted") else "",
+                      _table(["Category", "Technique", "Verdict", "Attack prompt", "Agent response", "Evaluator"],
+                             [[e(s["category"]), e(f"{s['technique']} ({s['complexity']})"), e(s["verdict"]),
+                               e(_clip(s["prompt"], 400)), e(_clip(s["response"], 800)),
+                               f"<b>{e(_score_text(s))}</b><br>{e(_clip(s['reason'], 800))}"] for s in r["samples"]])]
         if r["enabled_subcategories"]:
             parts.append("<details><summary>Sub-categories tested</summary><ul>"
                          + "".join(f"<li>{e(s)}</li>" for s in r["enabled_subcategories"]) + "</ul></details>")
